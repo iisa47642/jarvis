@@ -168,7 +168,10 @@ pub fn prepare_clean_start() {
         for pid in String::from_utf8_lossy(&out.stdout).split_whitespace() {
             if pid != me {
                 kill(pid);
-                crate::log::line(&format!("[startup] прибит прежний демон pid {pid}"));
+                // install/mod.rs компилируется и в jarvis-setup, где нет `crate::log`
+                // (см. конвенцию модуля выше). `log::line` всё равно начинается с
+                // println! → daemon.log под nohup, поэтому stdout сохраняет диагностику.
+                println!("[startup] прибит прежний демон pid {pid}");
             }
         }
     }
@@ -183,7 +186,7 @@ pub fn prepare_clean_start() {
                 kill(pid);
             }
             if !pids.trim().is_empty() {
-                crate::log::line(&format!("[startup] порт :{port} освобождён"));
+                println!("[startup] порт :{port} освобождён");
             }
         }
     }
