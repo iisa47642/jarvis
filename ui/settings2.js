@@ -25,6 +25,8 @@
   // текст последней ошибки (показываем в строке + retry), вместо тихого сброса.
   let activeDownload = null;
   const dlState = {};
+  // Мультивыбор моделей для «Скачать выбранное» (чекбоксы в строках, id → выбран).
+  const selectedModels = new Set();
 
   // ── Дефолты хоткеев (сверено с HK_DEFAULTS + settings_get в renderer.js) ──
   const HK_DEFAULTS = {
@@ -832,9 +834,26 @@
     for (const [kind, glabel] of GROUPS) {
       const items = models.filter((m) => m.kind === kind);
       if (!items.length) continue;
-      group.appendChild(el('div.drow', null, [el('div.grow', null, [el('div.dd', { text: glabel, style: 'margin-top:0' })])]));
+      const downloadable = items.filter((m) => !m.present && downloadActionFor(m));
+      const header = el('div.grow', null, [el('div.dd', { text: glabel, style: 'margin-top:0' })]);
+      const headerCtl = el('div.dctl');
+      // «Скачать выбранное» — только если в группе больше одной не-скачанной модели.
+      if (downloadable.length > 1) headerCtl.appendChild(bulkDownloadBtn(downloadable.map((m) => m.id)));
+      group.appendChild(el('div.drow', null, [header, headerCtl]));
       for (const m of items) group.appendChild(modelRow(m));
     }
+  }
+
+  // Кнопка «Скачать выбранное» для группы: качает отмеченные чекбоксами модели.
+  function bulkDownloadBtn(idsInGroup) {
+    const b = el('button.btn.sm', null, [iconSpan('download'), document.createTextNode('Скачать выбранное')]);
+    b.addEventListener('click', async () => {
+      const ids = idsInGroup.filter((id) => selectedModels.has(id));
+      if (!ids.length) return;
+      b.disabled = true; b.replaceChildren(document.createTextNode('Качаю…'));
+      await safe(() => window.jarvis.modelsInstall(ids), null);
+    });
+    return b;
   }
 
   // выбор download-action по id (порт downloadActionFor из renderer.js)
@@ -874,19 +893,24 @@
 
     const action = downloadActionFor(m);
     if (action) {
-      // не скачана: кнопка «Скачать» (или «Повторить» после ошибки) + место прогресса
+      // не скачана: чекбокс (мультивыбор) + кнопка «Скачать»/«Повторить» + место прогресса
       const wrap = el('div.dctl', { style: 'flex-direction:column;align-items:flex-end;gap:6px' });
       const retry = !!(dlState[m.id] && dlState[m.id].error);
       const label = retry ? 'Повторить' : action.label;
       const btn = el('button.btn.sm', null, [iconSpan(retry ? 'rotate-ccw' : 'download'), document.createTextNode(label)]);
       btn.addEventListener('click', async () => {
-        activeDownload = m.id;            // прогресс пойдёт только в ЭТУ строку
         delete dlState[m.id];             // сбросить прежнюю ошибку
         btn.disabled = true; btn.replaceChildren(document.createTextNode('Качаю…'));
-        await safe(action.run, null);
-        // финал прилетит событием stt_install_done / wake_install_done → перерисует панель
+        // единый путь: оркестратор шлёт прогресс/финал по id модели
+        await safe(() => window.jarvis.modelsInstall([m.id]), null);
       });
-      wrap.appendChild(btn);
+      const cb = el('input', { type: 'checkbox', style: 'margin-right:6px;vertical-align:middle' });
+      cb.checked = selectedModels.has(m.id);
+      cb.addEventListener('change', () => {
+        if (cb.checked) selectedModels.add(m.id); else selectedModels.delete(m.id);
+      });
+      const btnRow = el('div', { style: 'display:flex;align-items:center' }, [cb, btn]);
+      wrap.appendChild(btnRow);
       wrap.appendChild(el('div', { 'data-model': m.id })); // плейсхолдер прогресса
       return el('div.drow', null, [dot, grow, wrap]);
     }
@@ -1544,6 +1568,31 @@
     try { window.jarvis.onWakeInstallDone((res) => { finishDownload(res); reRenderPane('wake'); reRenderPane('stt'); }); } catch (e) {}
     // состояние аудио → обновить индикаторы wake-панели (если открыта)
     try { window.jarvis.onAudioState(() => { if (activePane === 'wake') reRenderPane('wake'); }); } catch (e) {}
+
+    // ── Единые события мультизагрузки (models_install) — прогресс по id модели ──
+    try {
+      window.jarvis.onModelInstallProgress(({ id, step }) => {
+        if (!currentRoot || !id) return;
+        const h = currentRoot.querySelector('[data-model="' + id + '"]');
+        if (!h) return;
+        h.textContent = '';
+        if (step && step.msg) h.appendChild(el('span.loadcap', { text: step.msg }));
+        const pct = step && typeof step.pct === 'number' ? step.pct : null;
+        if (pct != null) h.appendChild(progressBar(pct));
+      });
+    } catch (e) {}
+    try {
+      window.jarvis.onModelInstallDone(({ id, ok, error }) => {
+        if (!id) return;
+        if (!ok) dlState[id] = { error: error || 'неизвестная ошибка (подробности в ~/.jarvis/jarvis.log)' };
+        else { delete dlState[id]; selectedModels.delete(id); }
+      });
+    } catch (e) {}
+    try {
+      window.jarvis.onModelsInstallAllDone(() => {
+        reRenderPane('stt'); reRenderPane('wake'); reRenderPane('voice');
+      });
+    } catch (e) {}
   }
 
   /* ========================================================================

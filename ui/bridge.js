@@ -80,6 +80,11 @@
     sttInstallQwen: (key) => invoke('stt_install_qwen', { key }),
     onSttInstallProgress: (cb) => on('stt_install_progress', cb),
     onSttInstallDone: (cb) => on('stt_install_done', cb),
+    // Мультизагрузка моделей (онбординг + панель): единые события по id модели.
+    modelsInstall: (ids) => invoke('models_install', { ids }),
+    onModelInstallProgress: (cb) => on('model_install_progress', cb),
+    onModelInstallDone: (cb) => on('model_install_done', cb),
+    onModelsInstallAllDone: (cb) => on('models_install_all_done', cb),
 
     // «Под капотом» — служебный LLM (Claude/Codex) + установка Codex-SDK сайдкара
     serviceGet: () => invoke('service_get'),
