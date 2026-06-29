@@ -263,3 +263,34 @@ pub fn stt_install_qwen(app: AppHandle, key: String) {
         );
     });
 }
+
+/// Скачать НАБОР моделей последовательно в фоне (онбординг и панель «Модели»).
+/// Единые события: `model_install_progress {id, step}` (прогресс по строке id),
+/// `model_install_done {id, ok, error}`, в конце `models_install_all_done`.
+/// Сбой одной модели НЕ прерывает очередь — остальные качаются дальше.
+#[tauri::command]
+pub fn models_install(app: AppHandle, ids: Vec<String>) {
+    let d = crate::daemon::Daemon::get(&app);
+    let proxy = d.settings.proxy();
+    std::thread::spawn(move || {
+        let plan = install::plan_install(&ids, &install::installed_state());
+        for task in &plan {
+            let app_p = app.clone();
+            let id_p = task.id.clone();
+            let prog = move |step: Step| {
+                let _ = app_p.emit_to(
+                    "main",
+                    "model_install_progress",
+                    serde_json::json!({ "id": id_p, "step": step }),
+                );
+            };
+            let r = install::run_install_task(&task.id, &prog, proxy.as_deref());
+            let _ = app.emit_to(
+                "main",
+                "model_install_done",
+                serde_json::json!({ "id": task.id, "ok": r.is_ok(), "error": r.err() }),
+            );
+        }
+        let _ = app.emit_to("main", "models_install_all_done", serde_json::json!({}));
+    });
+}
