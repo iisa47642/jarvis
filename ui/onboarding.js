@@ -22,6 +22,9 @@
   const howtoEl = document.getElementById("howto");
   const settingsBtn = document.getElementById("settings");
   const btn = document.getElementById("action");
+  const modelsEl = document.getElementById("models");
+  const modelsGo = document.getElementById("models-go");
+  const modelsProg = document.getElementById("models-progress");
   function closeWindow() {
     invoke("onboarding_close").catch(() => { try { appWindow.close(); } catch {} });
   }
@@ -97,14 +100,15 @@
     else if (s.state === "warn") setRow(s.phase, "warn", s.msg);
   });
 
-  // завершение — показываем «как пользоваться»
+  // завершение — показываем «как пользоваться» + предлагаем скачать модели
   function showDone() {
     running = false;
     titleEl.textContent = "Готово!";
-    setLines(subEl, ["Jarvis подключён к Claude Code.", "Вот как им пользоваться."]);
+    setLines(subEl, ["Jarvis подключён к Claude Code.", "Выбери модели для скачивания (или позже в настройках)."]);
     stepsEl.hidden = true;
     proxyEl.hidden = true;
     hintEl.textContent = "";
+    modelsEl.hidden = false; // шаг выбора моделей
     howtoEl.hidden = false;
     settingsBtn.hidden = false;
     btn.disabled = false;
@@ -113,6 +117,41 @@
     btn.onclick = closeWindow;
   }
   listen("onboarding:done", showDone);
+
+  // ── Шаг выбора моделей: мультизагрузка через models_install с прогрессом ──
+  function selectedModelIds() {
+    const ids = [];
+    if (document.getElementById("m-whisper").checked) ids.push("whisper-turbo");
+    if (document.getElementById("m-qwen").checked) ids.push(document.getElementById("m-qwen-size").value);
+    if (document.getElementById("m-wake").checked) ids.push("hey_jarvis");
+    if (document.getElementById("m-silero").checked) ids.push("silero");
+    return ids;
+  }
+  function progRow(id) {
+    let row = modelsProg.querySelector('[data-mid="' + id + '"]');
+    if (!row) { row = document.createElement("div"); row.dataset.mid = id; modelsProg.appendChild(row); }
+    return row;
+  }
+  modelsGo.addEventListener("click", () => {
+    const ids = selectedModelIds();
+    if (!ids.length) return;
+    modelsGo.disabled = true;
+    modelsGo.textContent = "Качаю…";
+    invoke("models_install", { ids });
+  });
+  listen("model_install_progress", (e) => {
+    const { id, step } = e.payload;
+    const pct = step && typeof step.pct === "number" ? step.pct : null;
+    progRow(id).textContent = id + ": " + ((step && step.msg) || "") + (pct != null ? " " + pct + "%" : "");
+  });
+  listen("model_install_done", (e) => {
+    const { id, ok, error } = e.payload;
+    progRow(id).textContent = id + ": " + (ok ? "готово ✓" : "ошибка — " + (error || "см. логи"));
+  });
+  listen("models_install_all_done", () => {
+    modelsGo.disabled = false;
+    modelsGo.textContent = "Скачать выбранное";
+  });
 
   // первичное состояние
   async function init() {
