@@ -531,7 +531,7 @@
 #settings2 .snav .grp { font:600 9.5px/1 var(--s2-font); letter-spacing:.08em; text-transform:uppercase; color:var(--faint,#55555c); padding:10px 10px 5px; }
 
 /* ── Детальная панель ────────────────────────────────────────────────── */
-#settings2 .detail { flex:1; overflow-y:auto; padding:18px 24px 30px; min-height:0; min-width:0; }
+#settings2 .detail { flex:1; overflow-y:auto; padding:18px 24px 88px; min-height:0; min-width:0; }
 #settings2 .detail::-webkit-scrollbar { width:0; }
 #settings2 .dnav { display:inline-flex; gap:1px; padding:3px; border-radius:8px; background:rgba(255,255,255,0.05); border:1px solid var(--border, rgba(255,255,255,0.08)); margin-bottom:18px; }
 #settings2 .dnav button { appearance:none; border:0; background:transparent; color:var(--muted,#76767e); width:26px; height:22px; border-radius:6px; cursor:default; font-size:13px; display:grid; place-items:center; }
@@ -667,6 +667,22 @@
 #settings2 .dnav button svg.lucide { width:15px; height:15px; }
 #settings2 .range { -webkit-appearance:none; appearance:none; height:4px; border-radius:999px; background:rgba(255,255,255,0.12); outline:0; width:140px; }
 #settings2 .range::-webkit-slider-thumb { -webkit-appearance:none; width:14px; height:14px; border-radius:50%; background:var(--working,#6ca0ff); cursor:default; }
+
+/* ── Превью уведомления (раздел «Уведомления») ───────────────────────── */
+#settings2 .npvbox { display:flex; justify-content:center; padding:26px 20px 22px; border:1px solid var(--hairline, rgba(255,255,255,0.06)); border-radius:14px; background:rgba(255,255,255,0.015); margin-bottom:8px; position:relative; }
+#settings2 .npvbox .tag { position:absolute; top:10px; left:14px; font:600 10px/1 var(--s2-font); letter-spacing:.06em; color:var(--faint,#55555c); text-transform:uppercase; }
+#settings2 .npvcard { width:344px; padding:13px 16px 14px 18px; border-radius:20px; background:rgba(8,8,10,0.97); border:1px solid rgba(255,255,255,0.09); box-shadow:0 18px 50px rgba(0,0,0,0.5); }
+#settings2 .npvcard .row { display:flex; align-items:center; gap:10px; }
+#settings2 .npvdot { width:8px; height:8px; border-radius:50%; background:#41c98e; flex:none; }
+#settings2 .npvtitle { font-size:14px; font-weight:600; color:#f0f0f2; flex:1; min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+#settings2 .npvx { width:26px; height:26px; border-radius:50%; flex:none; display:grid; place-items:center; color:#d9d9de; font-size:11px; border:2.5px solid rgba(255,255,255,0.16); }
+#settings2 .npvmeta { margin:6px 16px 0 18px; font-size:11.5px; color:#8a8a93; display:flex; gap:7px; flex-wrap:wrap; align-items:center; }
+#settings2 .npvmeta:empty { display:none; }
+#settings2 .npvmeta .br { color:#7f8da3; font-family:"SF Mono", ui-monospace, Menlo, monospace; font-size:11px; }
+#settings2 .npvmeta .md { color:#a9966f; }
+#settings2 .npvmeta .ef { font:600 9.5px/1 "SF Mono", ui-monospace, Menlo, monospace; color:#9a9aa2; border:1px solid rgba(255,255,255,0.12); border-radius:5px; padding:3px 5px; }
+#settings2 .npvmeta .sp { color:#46464d; }
+#settings2 .npvbody { font-size:12.5px; line-height:1.45; color:#9a9aa2; margin:7px 16px 0 18px; }
 `;
     const style = document.createElement('style');
     style.id = 'settings2-style';
@@ -972,6 +988,10 @@
     group.appendChild(drow('Пауза чужого звука', 'Приглушать музыку/видео на время реплики, как Siri.',
       toggle(v.duck !== false, (on) => fire(() => window.jarvis.voiceSetDuck(on)))));
 
+    // озвучка только при Bluetooth-гарнитуре
+    group.appendChild(drow('Только через Bluetooth', 'Озвучивать, лишь когда подключена Bluetooth-гарнитура.',
+      toggle(v.bluetoothOnly !== false, (on) => fire(() => window.jarvis.voiceSetBluetoothOnly(on)))));
+
     pane.appendChild(group);
   }
 
@@ -1033,14 +1053,76 @@
     const _sk = skelGroup(3); pane.appendChild(_sk);
     const s = await safe(() => window.jarvis.getSettings(), {});
     _sk.remove();
-    const group = el('div.dgroup');
-    group.appendChild(drow('Когда агент закончил', 'Уведомлять о завершении ответа.',
+    // notify-блок шлём целиком при изменении (бэкенд мержит верхний уровень —
+    // полный объект, чтобы не затереть соседние поля).
+    const nf = Object.assign({ content: {}, ttlSec: 8 }, s.notify || {});
+    const content = Object.assign({ branch: true, model: false, effort: false, time: false }, nf.content || {});
+
+    // ── живое превью карточки (та же вёрстка, что у реального тоста) ──
+    const SAMPLE = { br: '⎇ feat/voice-settings', md: 'Opus 4.8', ef: 'low', time: '14:32' };
+    const pvMeta = el('div.npvmeta');
+    const pvCard = el('div.npvcard', null, [
+      el('div.row', null, [
+        el('span.npvdot'),
+        el('span.npvtitle', { text: 'checkout-flow' }),
+        el('span.npvx', { text: '✕' }),
+      ]),
+      pvMeta,
+      el('div.npvbody', { text: 'Готово · изменено 3 файла, тесты прошли.' }),
+    ]);
+    const renderPreview = () => {
+      pvMeta.textContent = '';
+      const segs = [];
+      if (content.branch) segs.push(['br', SAMPLE.br]);
+      if (content.model) segs.push(['md', SAMPLE.md]);
+      if (content.effort) segs.push(['ef', SAMPLE.ef]);
+      if (content.time) segs.push(['', SAMPLE.time]);
+      segs.forEach(([cls, txt], i) => {
+        if (i > 0) pvMeta.appendChild(el('span.sp', { text: '·' }));
+        pvMeta.appendChild(el('span' + (cls ? '.' + cls : ''), { text: txt }));
+      });
+    };
+    pane.appendChild(el('div.npvbox', null, [el('span.tag', { text: 'превью' }), pvCard]));
+
+    const saveContent = (k, on) => {
+      content[k] = on;
+      renderPreview();
+      fire(() => window.jarvis.setSettings({ notify: Object.assign({}, nf, { content: Object.assign({}, content) }) }));
+    };
+    renderPreview();
+
+    pane.appendChild(el('div.dsection', { text: 'Содержимое карточки' }));
+    const cg = el('div.dgroup');
+    cg.appendChild(drow('Текущая ветка', '⎇ рядом с проектом — удобно прыгать между задачами',
+      toggle(content.branch, (on) => saveContent('branch', on))));
+    cg.appendChild(drow('Модель', 'напр. Opus 4.8 — если несколько агентов',
+      toggle(content.model, (on) => saveContent('model', on))));
+    cg.appendChild(drow('Уровень усилия', 'reasoning effort: low / high / max',
+      toggle(content.effort, (on) => saveContent('effort', on))));
+    cg.appendChild(drow('Время', 'когда пришло уведомление',
+      toggle(content.time, (on) => saveContent('time', on))));
+    pane.appendChild(cg);
+
+    pane.appendChild(el('div.dsection', { text: 'Уведомлять о' }));
+    const eg = el('div.dgroup');
+    eg.appendChild(drow('Когда агент закончил', 'Уведомлять о завершении ответа.',
       toggle(s.notifyDone, (on) => fire(() => window.jarvis.setSettings({ notifyDone: on })))));
-    group.appendChild(drow('Когда ждёт тебя', 'Уведомлять, когда агенту нужен ответ.',
+    eg.appendChild(drow('Когда ждёт тебя', 'Уведомлять, когда агенту нужен ответ.',
       toggle(s.notifyWaiting, (on) => fire(() => window.jarvis.setSettings({ notifyWaiting: on })))));
-    group.appendChild(drow('Продолжать после лимита', 'Авто-«продолжай» при сбросе лимита.',
+    eg.appendChild(drow('Продолжать после лимита', 'Авто-«продолжай» при сбросе лимита.',
       toggle(s.autoResume !== false, (on) => fire(() => window.jarvis.setSettings({ autoResume: on })))));
-    pane.appendChild(group);
+    pane.appendChild(eg);
+
+    pane.appendChild(el('div.dsection', { text: 'Вид и поведение' }));
+    const vg = el('div.dgroup');
+    vg.appendChild(drow('Позиция', 'где появляются карточки',
+      segmented([{ value: 'center', label: 'Центр' }, { value: 'corner', label: 'Угол' }],
+        s.position || 'center', (v) => fire(() => window.jarvis.setSettings({ position: v })))));
+    const ttlNow = (typeof nf.ttlSec === 'number') ? nf.ttlSec : 8;
+    vg.appendChild(drow('Автоскрытие', 'через сколько прятать карточку (после озвучки, если она есть)',
+      segmented([{ value: 5, label: '5с' }, { value: 8, label: '8с' }, { value: 0, label: 'Не прятать' }],
+        ttlNow, (v) => fire(() => window.jarvis.setSettings({ notify: Object.assign({}, nf, { ttlSec: Number(v) }) })))));
+    pane.appendChild(vg);
   }
 
   // 6. Бодрость (awake) — keep-awake через плагины (getPlugins / pluginCmd)
@@ -1638,10 +1720,7 @@
 
     // ── Детальная колонка ──
     const detail = el('div.detail');
-    detail.appendChild(el('div.dnav', null, [
-      el('button', null, icon('chevron-left')),
-      el('button', null, icon('chevron-right')),
-    ]));
+    // (стрелки ‹ › убраны — навигация только по сайдбару)
     // по одной панели-контейнеру на вкладку; активная получит .on
     const paneNodes = {};
     for (const n of NAV) {
