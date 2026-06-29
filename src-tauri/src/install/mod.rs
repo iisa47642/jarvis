@@ -137,6 +137,54 @@ impl Status {
     }
 }
 
+/// Снимок «что уже установлено» — вход планировщика. Чистый (без обращения к FS),
+/// чтобы `plan_install` тестировался без сети/диска.
+#[derive(Debug, Clone, Default)]
+pub struct Installed {
+    pub whisper: bool,
+    pub silero: bool,
+    pub wake: bool,
+    pub runtime: bool, // qwen3-MLX venv (рантайм для весов Qwen)
+    pub qwen_0_6b: bool,
+    pub qwen_1_7b: bool,
+}
+
+/// Один шаг плана установки: `id` совпадает с id строки модели в UI (маршрутизация
+/// прогресса по `data-model`), `kind` — группа панели (stt|wake|voice|runtime).
+#[derive(Debug, Clone, PartialEq)]
+pub struct InstallTask {
+    pub id: String,
+    pub kind: &'static str,
+}
+
+/// Построить план установки из выбранных id: раскрывает зависимость qwen→runtime
+/// (venv первым шагом), даёт канонический порядок и выкидывает уже установленное.
+pub fn plan_install(ids: &[String], inst: &Installed) -> Vec<InstallTask> {
+    let want = |x: &str| ids.iter().any(|i| i == x);
+    let mut tasks = Vec::new();
+    let needs_qwen =
+        (want("qwen3-0.6b") && !inst.qwen_0_6b) || (want("qwen3-1.7b") && !inst.qwen_1_7b);
+    if needs_qwen && !inst.runtime {
+        tasks.push(InstallTask { id: "qwen3-runtime".into(), kind: "runtime" });
+    }
+    if want("whisper-turbo") && !inst.whisper {
+        tasks.push(InstallTask { id: "whisper-turbo".into(), kind: "stt" });
+    }
+    if want("qwen3-0.6b") && !inst.qwen_0_6b {
+        tasks.push(InstallTask { id: "qwen3-0.6b".into(), kind: "stt" });
+    }
+    if want("qwen3-1.7b") && !inst.qwen_1_7b {
+        tasks.push(InstallTask { id: "qwen3-1.7b".into(), kind: "stt" });
+    }
+    if want("silero") && !inst.silero {
+        tasks.push(InstallTask { id: "silero".into(), kind: "voice" });
+    }
+    if want("hey_jarvis") && !inst.wake {
+        tasks.push(InstallTask { id: "hey_jarvis".into(), kind: "wake" });
+    }
+    tasks
+}
+
 /* ================= пути ================= */
 
 fn home() -> PathBuf {
@@ -1471,6 +1519,33 @@ fn write_executable(dst: &Path, content: &str) {
 
 /* ================= публичный API: status / install / uninstall ================= */
 
+/// Текущее «что установлено» из реального статуса — вход оркестратора `models_install`.
+pub fn installed_state() -> Installed {
+    let s = status();
+    Installed {
+        whisper: s.whisper_model,
+        silero: s.silero,
+        wake: s.wakeword_models,
+        runtime: s.qwen3_sidecar,
+        qwen_0_6b: qwen_weights_present("qwen3-0.6b"),
+        qwen_1_7b: qwen_weights_present("qwen3-1.7b"),
+    }
+}
+
+/// Запустить установку одной модели по id (маршрутизация на готовый загрузчик).
+/// Используется оркестратором `models_install`. Неизвестный id → Err.
+pub fn run_install_task(id: &str, progress: &Progress, proxy: Option<&str>) -> Result<(), String> {
+    match id {
+        "qwen3-runtime" => install_stt_sidecar(progress, proxy),
+        "whisper-turbo" => install_whisper(progress, proxy),
+        "qwen3-0.6b" => preload_qwen("qwen3-0.6b", progress, proxy),
+        "qwen3-1.7b" => preload_qwen("qwen3-1.7b", progress, proxy),
+        "hey_jarvis" => install_wakeword(progress, proxy),
+        "silero" => install_silero(progress, proxy),
+        other => Err(format!("неизвестная модель: {other}")),
+    }
+}
+
 /// Что из интеграции стоит сейчас (для онбординга и `status`).
 pub fn status() -> Status {
     let hooks = match read_settings() {
@@ -1974,6 +2049,51 @@ pub fn foreign_hook_count() -> usize {
         }
     }
     n
+}
+
+#[cfg(test)]
+mod plan_tests {
+    use super::*;
+
+    fn ids(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn qwen_selection_pulls_runtime_first_and_dedups() {
+        let inst = Installed::default(); // ничего не установлено
+        let plan = plan_install(&ids(&["qwen3-0.6b"]), &inst);
+        let order: Vec<&str> = plan.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(order, vec!["qwen3-runtime", "qwen3-0.6b"]);
+    }
+
+    #[test]
+    fn skips_already_installed() {
+        let inst =
+            Installed { whisper: true, runtime: true, qwen_0_6b: true, ..Default::default() };
+        let plan = plan_install(&ids(&["whisper-turbo", "qwen3-0.6b"]), &inst);
+        assert!(plan.is_empty(), "уже установленное не планируется: {plan:?}");
+    }
+
+    #[test]
+    fn runtime_not_readded_when_present() {
+        let inst = Installed { runtime: true, ..Default::default() };
+        let plan = plan_install(&ids(&["qwen3-1.7b"]), &inst);
+        let order: Vec<&str> = plan.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(order, vec!["qwen3-1.7b"]); // venv уже есть → без runtime-шага
+    }
+
+    #[test]
+    fn canonical_order_full_selection() {
+        let inst = Installed::default();
+        let plan =
+            plan_install(&ids(&["hey_jarvis", "silero", "whisper-turbo", "qwen3-0.6b"]), &inst);
+        let order: Vec<&str> = plan.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(
+            order,
+            vec!["qwen3-runtime", "whisper-turbo", "qwen3-0.6b", "silero", "hey_jarvis"]
+        );
+    }
 }
 
 #[cfg(test)]
