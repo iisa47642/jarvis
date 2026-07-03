@@ -23,6 +23,7 @@
     closeChat: () => invoke('chat_close'),
     onChatAppend: (cb) => on('chat:append', cb),
     focusTerminal: (sessionId) => invoke('terminal_focus', { sessionId }),
+    launchSession: (cwd, agent, sessionId) => invoke('session_launch', { cwd: cwd ?? null, agent, sessionId: sessionId ?? null }),
     sendReply: (sessionId, text) => invoke('session_reply', { sessionId, text }),
     // вставленная картинка → временный файл; путь уйдёт агенту в промпте
     saveImage: (dataBase64, ext) => invoke('session_save_image', { dataBase64, ext }),
