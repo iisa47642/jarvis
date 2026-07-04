@@ -72,14 +72,21 @@ pub fn settings_get(app: AppHandle) -> Value {
 pub fn register_hotkey(d: &Arc<Daemon>, accelerator: &str) -> Result<(), String> {
     let gs = d.app.global_shortcut();
     let current = d.settings.string("hotkey");
+    if accelerator.is_empty() {
+        // «не назначен»: снять текущий, ничего не регистрировать
+        if !current.is_empty() && current != HK_NONE {
+            let _ = gs.unregister(current.as_str());
+        }
+        return Ok(());
+    }
     if accelerator == current && gs.is_registered(accelerator) {
         return Ok(());
     }
-    if accelerator != current {
+    if accelerator != current && !current.is_empty() && current != HK_NONE {
         let _ = gs.unregister(current.as_str());
     }
     if gs.register(accelerator).is_err() {
-        if accelerator != current {
+        if accelerator != current && !current.is_empty() && current != HK_NONE {
             let _ = gs.register(current.as_str());
         }
         return Err(format!("Сочетание {accelerator} занято системой"));
@@ -87,14 +94,363 @@ pub fn register_hotkey(d: &Arc<Daemon>, accelerator: &str) -> Result<(), String>
     Ok(())
 }
 
-/// Аккселератор тумблера тихого режима: настройка `quietHotkey`, дефолт ⌘⌥J.
-pub fn quiet_accelerator(d: &Arc<Daemon>) -> String {
-    let s = d.settings.string("quietHotkey");
-    if s.is_empty() {
-        "Command+Alt+J".to_string()
-    } else {
-        s
+/* ================= реестр хоткей-действий ================= */
+
+/// Сентинел «хоткей не назначен» в настройке (пустая строка значит «дефолт»,
+/// поэтому нужен отдельный маркер — появляется после перехвата сочетания).
+pub const HK_NONE: &str = "none";
+
+/// Действие с глобальным хоткеем — единый реестр для назначения, детекта
+/// конфликтов и приостановки на время записи сочетания.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum HkAction {
+    Panel,
+    Continue,
+    Repeat,
+    Mute,
+    Quiet,
+    Select,
+    Dictation,
+}
+
+impl HkAction {
+    pub const ALL: [HkAction; 7] = [
+        HkAction::Panel,
+        HkAction::Continue,
+        HkAction::Repeat,
+        HkAction::Mute,
+        HkAction::Quiet,
+        HkAction::Select,
+        HkAction::Dictation,
+    ];
+
+    /// Строковый id в IPC-контракте (bridge.js шлёт его в hotkey_assign).
+    pub fn id(self) -> &'static str {
+        match self {
+            HkAction::Panel => "panel",
+            HkAction::Continue => "continue",
+            HkAction::Repeat => "repeat",
+            HkAction::Mute => "mute",
+            HkAction::Quiet => "quiet",
+            HkAction::Select => "select",
+            HkAction::Dictation => "dictation",
+        }
     }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        HkAction::ALL.into_iter().find(|a| a.id() == s)
+    }
+
+    /// Подпись для сообщений о конфликте и списка привязок в UI.
+    pub fn label(self) -> &'static str {
+        match self {
+            HkAction::Panel => "Открыть панель",
+            HkAction::Continue => "Продолжить сессию",
+            HkAction::Repeat => "Повторить",
+            HkAction::Mute => "Без звука",
+            HkAction::Quiet => "Тихий режим",
+            HkAction::Select => "Варианты ответа",
+            HkAction::Dictation => "Диктовка",
+        }
+    }
+
+    pub fn default_accel(self) -> &'static str {
+        match self {
+            HkAction::Panel => "Command+J",
+            HkAction::Continue => "Command+Alt+C",
+            HkAction::Repeat => "Command+Alt+R",
+            HkAction::Mute => "Command+Alt+M",
+            HkAction::Quiet => "Command+Alt+J",
+            HkAction::Select => SELECT_TEMPLATE_DEFAULT,
+            HkAction::Dictation => "F8",
+        }
+    }
+
+    /// Ключ в настройках. None — диктовка: живёт в settings.stt.hotkey,
+    /// читается/пишется отдельным путём (SttConfig / set_stt).
+    pub fn settings_key(self) -> Option<&'static str> {
+        match self {
+            HkAction::Panel => Some("hotkey"),
+            HkAction::Continue => Some("continueHotkey"),
+            HkAction::Repeat => Some("repeatHotkey"),
+            HkAction::Mute => Some("muteHotkey"),
+            HkAction::Quiet => Some("quietHotkey"),
+            HkAction::Select => Some("selectHotkeyTemplate"),
+            HkAction::Dictation => None,
+        }
+    }
+}
+
+/// Сырое значение настройки → акселератор действия.
+/// "" → дефолт; HK_NONE → None («не назначен»); select нормализуется.
+pub fn accel_from_raw(raw: &str, a: HkAction) -> Option<String> {
+    if raw == HK_NONE {
+        return None;
+    }
+    if raw.is_empty() {
+        return Some(a.default_accel().to_string());
+    }
+    if a == HkAction::Select {
+        return Some(normalize_select_template(raw));
+    }
+    Some(raw.to_string())
+}
+
+/// Текущий акселератор действия из настроек; None = «не назначен».
+pub fn action_accel(d: &Arc<Daemon>, a: HkAction) -> Option<String> {
+    let raw = match a {
+        HkAction::Dictation => {
+            crate::stt::config::SttConfig::from_settings(&d.settings.load()).hotkey
+        }
+        _ => d.settings.string(a.settings_key().expect("не-dictation имеет ключ")),
+    };
+    accel_from_raw(&raw, a)
+}
+
+/// Акселератор действия → конкретные шорткаты (select → до 9 экземпляров).
+/// Битые части молча выпадают — битое не конфликтует.
+pub fn action_shortcuts(a: HkAction, accel: &str) -> Vec<Shortcut> {
+    if a == HkAction::Select {
+        (1..=9)
+            .filter_map(|n| select_accel(accel, n).parse::<Shortcut>().ok())
+            .collect()
+    } else {
+        accel.parse::<Shortcut>().ok().into_iter().collect()
+    }
+}
+
+/// Конфликт нового сочетания действия `a` с текущими привязками ОСТАЛЬНЫХ
+/// действий. bindings — (действие, акселератор), «не назначенные» не передавать.
+/// Чистая функция — покрыта юнитами без Daemon.
+pub fn find_conflict(
+    bindings: &[(HkAction, String)],
+    a: HkAction,
+    accel: &str,
+) -> Option<HkAction> {
+    let new = action_shortcuts(a, accel);
+    bindings.iter().find_map(|(other, cur)| {
+        if *other == a {
+            return None;
+        }
+        let cur_sc = action_shortcuts(*other, cur);
+        new.iter().any(|n| cur_sc.contains(n)).then_some(*other)
+    })
+}
+
+/// Снять регистрацию текущего сочетания действия (select — весь набор).
+fn unregister_action(d: &Arc<Daemon>, a: HkAction) {
+    let Some(accel) = action_accel(d, a) else { return };
+    let gs = d.app.global_shortcut();
+    match a {
+        HkAction::Select => {
+            for n in 1..=9 {
+                let _ = gs.unregister(select_accel(&accel, n).as_str());
+            }
+        }
+        _ => {
+            let _ = gs.unregister(accel.as_str());
+        }
+    }
+}
+
+/// Зарегистрировать сочетание действия. select регистрируется ТОЛЬКО при
+/// активном вопросе (набор динамический — см. set_select_hotkeys), поэтому
+/// принимает флаг. Err = сочетание занято системой.
+fn register_action_accel(
+    d: &Arc<Daemon>,
+    a: HkAction,
+    accel: &str,
+    select_active: bool,
+) -> Result<(), ()> {
+    let gs = d.app.global_shortcut();
+    match a {
+        HkAction::Select => {
+            if !select_active {
+                return Ok(());
+            }
+            for n in 1..=9 {
+                if gs.register(select_accel(accel, n).as_str()).is_err() {
+                    for k in 1..n {
+                        let _ = gs.unregister(select_accel(accel, k).as_str());
+                    }
+                    return Err(());
+                }
+            }
+            Ok(())
+        }
+        _ => gs.register(accel).map_err(|_| ()),
+    }
+}
+
+/// Сохранить сырое значение акселератора действия (HK_NONE = «не назначен»).
+async fn persist_accel(d: &Arc<Daemon>, a: HkAction, raw: &str) {
+    match a.settings_key() {
+        Some(key) => {
+            let _ = via_gate_panel(d, "settings.set", json!({ "patch": { key: raw } })).await;
+        }
+        None => {
+            // диктовка: settings.stt.hotkey
+            let mut patch = serde_json::Map::new();
+            patch.insert("hotkey".into(), Value::String(raw.to_string()));
+            d.settings.set_stt(patch);
+        }
+    }
+}
+
+/// Привязки всех действий для UI настроек: id, подпись, текущее сочетание
+/// (null = не назначен), дефолт.
+#[tauri::command]
+pub fn hotkey_bindings(app: AppHandle) -> Value {
+    let d = Daemon::get(&app);
+    let list: Vec<Value> = HkAction::ALL
+        .iter()
+        .map(|a| {
+            json!({
+                "action": a.id(),
+                "label": a.label(),
+                "accel": action_accel(&d, *a),
+                "default": a.default_accel(),
+            })
+        })
+        .collect();
+    json!({ "ok": true, "bindings": list })
+}
+
+/// Назначить хоткей действию. Валидация → конфликт со своими (steal=false →
+/// { ok:false, conflict } и ничего не меняется; steal=true → у конфликтующего
+/// действия хоткей снимается в «не назначен») → перерегистрация с откатом
+/// («занято системой» — как раньше).
+#[tauri::command]
+pub async fn hotkey_assign(
+    app: AppHandle,
+    action: String,
+    accel: String,
+    steal: Option<bool>,
+) -> Value {
+    let d = Daemon::get(&app);
+    let Some(a) = HkAction::parse(&action) else {
+        return err(format!("Неизвестное действие: {action}"));
+    };
+    let accel = accel.trim().to_string();
+    if accel.is_empty() {
+        return err("Пустое сочетание");
+    }
+    if a == HkAction::Select {
+        if normalize_select_template(&accel) != accel {
+            return err(format!("Битый шаблон «{accel}» — нужен вид Command+Alt+{{n}}"));
+        }
+    } else if accel.parse::<Shortcut>().is_err() {
+        return err(format!("Не разобрал сочетание: {accel}"));
+    }
+
+    let old = action_accel(&d, a);
+    if old.as_deref() == Some(accel.as_str()) {
+        return json!({ "ok": true, "accel": accel });
+    }
+
+    // конфликты со своими хоткеями; перехват может каскадом задеть несколько
+    // действий (напр. новый шаблон {n} бьётся с двумя) — снимаем в цикле
+    let steal = steal.unwrap_or(false);
+    loop {
+        let bindings: Vec<(HkAction, String)> = HkAction::ALL
+            .iter()
+            .filter_map(|o| action_accel(&d, *o).map(|acc| (*o, acc)))
+            .collect();
+        let Some(other) = find_conflict(&bindings, a, &accel) else { break };
+        if !steal {
+            return json!({ "ok": false, "conflict": { "action": other.id(), "label": other.label() } });
+        }
+        unregister_action(&d, other);
+        persist_accel(&d, other, HK_NONE).await;
+        crate::log::line(&format!(
+            "[hotkeys] перехват: «{}» остался без сочетания",
+            other.label()
+        ));
+    }
+
+    // активность набора 1..9 фиксируем ДО снятия старого
+    let select_active = a == HkAction::Select
+        && old
+            .as_ref()
+            .map(|o| {
+                d.app
+                    .global_shortcut()
+                    .is_registered(select_accel(o, 1).as_str())
+            })
+            .unwrap_or(false);
+    unregister_action(&d, a);
+    if register_action_accel(&d, a, &accel, select_active).is_err() {
+        if let Some(oldacc) = &old {
+            let _ = register_action_accel(&d, a, oldacc, select_active);
+        }
+        return err(format!("Сочетание {accel} занято системой"));
+    }
+    persist_accel(&d, a, &accel).await;
+    json!({ "ok": true, "accel": accel })
+}
+
+/// Приостановить/вернуть ВСЕ глобальные хоткеи Jarvis — режим записи
+/// сочетания в настройках: пока пользователь жмёт комбо, команды не должны
+/// срабатывать (и наши же шорткаты не должны съедать keydown у webview).
+/// Идемпотентно. Страховки от «умершего» UI: авто-ресюм через 15 с
+/// (повторный suspend продлевает) и ресюм при скрытии панели.
+pub fn hotkeys_set_suspended(d: &Arc<Daemon>, on: bool) {
+    use std::sync::atomic::Ordering;
+    let was = d.hk_suspend_gen.load(Ordering::SeqCst) != 0;
+    if on {
+        if !was {
+            // активность набора 1..9 запоминаем ДО снятия
+            let select_on = action_accel(d, HkAction::Select)
+                .map(|t| {
+                    d.app
+                        .global_shortcut()
+                        .is_registered(select_accel(&t, 1).as_str())
+                })
+                .unwrap_or(false);
+            d.hk_select_was_on.store(select_on, Ordering::SeqCst);
+            for a in HkAction::ALL {
+                unregister_action(d, a);
+            }
+            crate::log::line("[hotkeys] приостановлены (запись сочетания)");
+        }
+        let gen = d.hk_suspend_gen.fetch_add(1, Ordering::SeqCst) + 1;
+        let d2 = d.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(15));
+            if d2.hk_suspend_gen.load(Ordering::SeqCst) == gen {
+                crate::log::line("[hotkeys] авто-ресюм по таймауту — UI не вернул хоткеи");
+                hotkeys_set_suspended(&d2, false);
+            }
+        });
+    } else {
+        if !was {
+            return;
+        }
+        d.hk_suspend_gen.store(0, Ordering::SeqCst);
+        if let Err(e) = register_hotkey(d, &action_accel(d, HkAction::Panel).unwrap_or_default()) {
+            crate::log::line(&format!("[hotkeys] ресюм панели: {e}"));
+        }
+        register_quiet_hotkey(d);
+        register_continue_hotkey(d);
+        register_dictation_hotkey(d);
+        register_repeat_hotkey(d);
+        register_mute_hotkey(d);
+        if d.hk_select_was_on.load(Ordering::SeqCst) {
+            set_select_hotkeys(d, true);
+        }
+        crate::log::line("[hotkeys] возвращены");
+    }
+}
+
+#[tauri::command]
+pub fn hotkeys_suspend(app: AppHandle, on: bool) -> Value {
+    hotkeys_set_suspended(&Daemon::get(&app), on);
+    ok()
+}
+
+/// Аккселератор тумблера тихого режима ("" = не назначен), дефолт ⌘⌥J.
+pub fn quiet_accelerator(d: &Arc<Daemon>) -> String {
+    action_accel(d, HkAction::Quiet).unwrap_or_default()
 }
 
 /// Совпал ли сработавший shortcut с хоткеем тихого режима.
@@ -108,20 +464,18 @@ pub fn is_quiet_hotkey(d: &Arc<Daemon>, shortcut: &Shortcut) -> bool {
 /// Зарегистрировать хоткей тихого режима на старте (best-effort).
 pub fn register_quiet_hotkey(d: &Arc<Daemon>) {
     let accel = quiet_accelerator(d);
+    if accel.is_empty() {
+        return; // «не назначен»
+    }
     let gs = d.app.global_shortcut();
     if !gs.is_registered(accel.as_str()) {
         let _ = gs.register(accel.as_str());
     }
 }
 
-/// Аккселератор «Продолжить»: настройка `continueHotkey`, дефолт ⌘⌥C.
+/// Аккселератор «Продолжить» ("" = не назначен), дефолт ⌘⌥C.
 pub fn continue_accelerator(d: &Arc<Daemon>) -> String {
-    let s = d.settings.string("continueHotkey");
-    if s.is_empty() {
-        "Command+Alt+C".to_string()
-    } else {
-        s
-    }
+    action_accel(d, HkAction::Continue).unwrap_or_default()
 }
 
 pub fn is_continue_hotkey(d: &Arc<Daemon>, shortcut: &Shortcut) -> bool {
@@ -133,20 +487,18 @@ pub fn is_continue_hotkey(d: &Arc<Daemon>, shortcut: &Shortcut) -> bool {
 
 pub fn register_continue_hotkey(d: &Arc<Daemon>) {
     let accel = continue_accelerator(d);
+    if accel.is_empty() {
+        return; // «не назначен»
+    }
     let gs = d.app.global_shortcut();
     if !gs.is_registered(accel.as_str()) {
         let _ = gs.register(accel.as_str());
     }
 }
 
-/// Аккселератор диктовки: из `SttConfig.hotkey`, дефолт "F8".
+/// Аккселератор диктовки: из `SttConfig.hotkey` ("" = не назначен), дефолт "F8".
 pub fn dictation_accelerator(d: &Arc<Daemon>) -> String {
-    let cfg = crate::stt::config::SttConfig::from_settings(&d.settings.load());
-    if cfg.hotkey.is_empty() {
-        "F8".to_string()
-    } else {
-        cfg.hotkey
-    }
+    action_accel(d, HkAction::Dictation).unwrap_or_default()
 }
 
 /// Совпал ли сработавший shortcut с хоткеем диктовки.
@@ -160,6 +512,9 @@ pub fn is_dictation_hotkey(d: &Arc<Daemon>, shortcut: &Shortcut) -> bool {
 /// Зарегистрировать хоткей диктовки на старте (best-effort).
 pub fn register_dictation_hotkey(d: &Arc<Daemon>) {
     let accel = dictation_accelerator(d);
+    if accel.is_empty() {
+        return; // «не назначен»
+    }
     let gs = d.app.global_shortcut();
     if !gs.is_registered(accel.as_str()) {
         if let Err(e) = gs.register(accel.as_str()) {
@@ -170,14 +525,9 @@ pub fn register_dictation_hotkey(d: &Arc<Daemon>) {
     }
 }
 
-/// Аккселератор «повторить уведомление»: настройка `repeatHotkey`, дефолт ⌘⌥R.
+/// Аккселератор «повторить уведомление» ("" = не назначен), дефолт ⌘⌥R.
 pub fn repeat_accelerator(d: &Arc<Daemon>) -> String {
-    let s = d.settings.string("repeatHotkey");
-    if s.is_empty() {
-        "Command+Alt+R".to_string()
-    } else {
-        s
-    }
+    action_accel(d, HkAction::Repeat).unwrap_or_default()
 }
 
 pub fn is_repeat_hotkey(d: &Arc<Daemon>, shortcut: &Shortcut) -> bool {
@@ -189,20 +539,18 @@ pub fn is_repeat_hotkey(d: &Arc<Daemon>, shortcut: &Shortcut) -> bool {
 
 pub fn register_repeat_hotkey(d: &Arc<Daemon>) {
     let accel = repeat_accelerator(d);
+    if accel.is_empty() {
+        return; // «не назначен»
+    }
     let gs = d.app.global_shortcut();
     if !gs.is_registered(accel.as_str()) {
         let _ = gs.register(accel.as_str());
     }
 }
 
-/// Аккселератор «без звука» (mute): настройка `muteHotkey`, дефолт ⌘⌥M.
+/// Аккселератор «без звука» (mute) ("" = не назначен), дефолт ⌘⌥M.
 pub fn mute_accelerator(d: &Arc<Daemon>) -> String {
-    let s = d.settings.string("muteHotkey");
-    if s.is_empty() {
-        "Command+Alt+M".to_string()
-    } else {
-        s
-    }
+    action_accel(d, HkAction::Mute).unwrap_or_default()
 }
 
 pub fn is_mute_hotkey(d: &Arc<Daemon>, shortcut: &Shortcut) -> bool {
@@ -214,6 +562,9 @@ pub fn is_mute_hotkey(d: &Arc<Daemon>, shortcut: &Shortcut) -> bool {
 
 pub fn register_mute_hotkey(d: &Arc<Daemon>) {
     let accel = mute_accelerator(d);
+    if accel.is_empty() {
+        return; // «не назначен»
+    }
     let gs = d.app.global_shortcut();
     if !gs.is_registered(accel.as_str()) {
         let _ = gs.register(accel.as_str());
@@ -239,10 +590,6 @@ pub fn normalize_select_template(raw: &str) -> String {
     }
 }
 
-/// Шаблон хоткеев выбора варианта: настройка `selectHotkeyTemplate`.
-pub fn select_template(d: &Arc<Daemon>) -> String {
-    normalize_select_template(&d.settings.string("selectHotkeyTemplate"))
-}
 
 /// Если shortcut — экземпляр шаблона с цифрой, вернуть номер варианта (1..9).
 pub fn match_select_template(template: &str, shortcut: &Shortcut) -> Option<u32> {
@@ -259,7 +606,11 @@ pub fn match_select_template(template: &str, shortcut: &Shortcut) -> Option<u32>
 /// не перехватывать цифровые комбо глобально всё время. Идемпотентно: трогаем
 /// только при смене состояния.
 pub fn set_select_hotkeys(d: &Arc<Daemon>, on: bool) {
-    set_select_hotkeys_tpl(d, on, &select_template(d));
+    // «не назначен» → снимать нечего и ставить нечего
+    let Some(tpl) = action_accel(d, HkAction::Select) else {
+        return;
+    };
+    set_select_hotkeys_tpl(d, on, &tpl);
 }
 
 /// То же с явным шаблоном — при смене selectHotkeyTemplate старый набор
@@ -301,7 +652,7 @@ pub fn set_select_hotkeys_tpl(d: &Arc<Daemon>, on: bool, template: &str) {
 
 /// Если shortcut — это <шаблон>+<цифра>, вернуть номер варианта (1..9).
 pub fn is_select_hotkey(d: &Arc<Daemon>, shortcut: &Shortcut) -> Option<u32> {
-    match_select_template(&select_template(d), shortcut)
+    match_select_template(&action_accel(d, HkAction::Select)?, shortcut)
 }
 
 #[tauri::command]
@@ -379,7 +730,8 @@ pub async fn settings_set(app: AppHandle, patch: Value) -> Value {
                     "Битый шаблон «{tpl}» — нужен вид Command+Alt+{{n}}"
                 ));
             }
-            let old = select_template(&d);
+            let old = action_accel(&d, HkAction::Select)
+                .unwrap_or_else(|| SELECT_TEMPLATE_DEFAULT.to_string());
             let gs = d.app.global_shortcut();
             let active = gs.is_registered(select_accel(&old, 1).as_str());
             if active && tpl != old {
@@ -1858,5 +2210,91 @@ mod tests {
     fn match_select_template_rejects_non_digit_combo() {
         let sc: Shortcut = "Command+Alt+K".parse().unwrap();
         assert_eq!(match_select_template("Command+Alt+{n}", &sc), None);
+    }
+
+    // --- реестр действий HkAction ---
+
+    #[test]
+    fn hk_action_parse_roundtrip() {
+        for a in HkAction::ALL {
+            assert_eq!(HkAction::parse(a.id()), Some(a));
+        }
+        assert_eq!(HkAction::parse("bogus"), None);
+    }
+
+    #[test]
+    fn accel_from_raw_empty_is_default() {
+        assert_eq!(
+            accel_from_raw("", HkAction::Quiet),
+            Some("Command+Alt+J".to_string())
+        );
+        assert_eq!(accel_from_raw("", HkAction::Dictation), Some("F8".to_string()));
+    }
+
+    #[test]
+    fn accel_from_raw_none_is_unassigned() {
+        assert_eq!(accel_from_raw(HK_NONE, HkAction::Mute), None);
+    }
+
+    #[test]
+    fn accel_from_raw_select_normalizes() {
+        // битый шаблон мягко деградирует в дефолт, как normalize_select_template
+        assert_eq!(
+            accel_from_raw("Command+Alt+5", HkAction::Select),
+            Some(SELECT_TEMPLATE_DEFAULT.to_string())
+        );
+    }
+
+    // --- детект конфликтов ---
+
+    fn b(a: HkAction, acc: &str) -> (HkAction, String) {
+        (a, acc.to_string())
+    }
+
+    #[test]
+    fn conflict_direct_hit() {
+        let bindings = vec![b(HkAction::Mute, "Command+Alt+M")];
+        assert_eq!(
+            find_conflict(&bindings, HkAction::Quiet, "Command+Alt+M"),
+            Some(HkAction::Mute)
+        );
+    }
+
+    #[test]
+    fn conflict_ignores_self_and_free() {
+        let bindings = vec![
+            b(HkAction::Quiet, "Command+Alt+J"),
+            b(HkAction::Mute, "Command+Alt+M"),
+        ];
+        // то же действие — не конфликт (перезапись самого себя)
+        assert_eq!(find_conflict(&bindings, HkAction::Quiet, "Command+Alt+J"), None);
+        // свободное сочетание — не конфликт
+        assert_eq!(find_conflict(&bindings, HkAction::Quiet, "Command+Alt+X"), None);
+    }
+
+    #[test]
+    fn conflict_with_select_instance() {
+        // ⌘⌥3 бьётся с экземпляром шаблона ⌘⌥{n}
+        let bindings = vec![b(HkAction::Select, "Command+Alt+{n}")];
+        assert_eq!(
+            find_conflict(&bindings, HkAction::Dictation, "Command+Alt+3"),
+            Some(HkAction::Select)
+        );
+    }
+
+    #[test]
+    fn conflict_new_select_template_vs_plain() {
+        // новый шаблон ⌘⌃{n} бьётся с уже занятым ⌘⌃5
+        let bindings = vec![b(HkAction::Repeat, "Command+Control+5")];
+        assert_eq!(
+            find_conflict(&bindings, HkAction::Select, "Command+Control+{n}"),
+            Some(HkAction::Repeat)
+        );
+    }
+
+    #[test]
+    fn conflict_skips_broken_bindings() {
+        let bindings = vec![b(HkAction::Mute, "Bogus+Nope")];
+        assert_eq!(find_conflict(&bindings, HkAction::Quiet, "Command+Alt+M"), None);
     }
 }

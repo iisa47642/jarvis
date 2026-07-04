@@ -179,6 +179,9 @@ fn main() {
             ipc::prompts_get,
             ipc::stt_set_engine,
             ipc::stt_set_hotkey,
+            ipc::hotkey_bindings,
+            ipc::hotkey_assign,
+            ipc::hotkeys_suspend,
             ipc::stt_set_noise_gate,
             ipc::stt_test,
             ipc::voice_history_open,
@@ -274,7 +277,8 @@ fn main() {
                 ));
             });
 
-            if let Err(e) = ipc::register_hotkey(&d, &d.settings.string("hotkey")) {
+            let hk0 = ipc::action_accel(&d, ipc::HkAction::Panel).unwrap_or_default();
+            if let Err(e) = ipc::register_hotkey(&d, &hk0) {
                 eprintln!("[jarvis] хоткей не зарегистрировался: {e}");
             }
             ipc::register_quiet_hotkey(&d); // тумблер тихого режима (⌘⌥J)
