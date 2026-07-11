@@ -5,12 +5,43 @@
 //! никакой интерполяции в shell-строку.
 
 use std::process::Stdio;
+use std::sync::OnceLock;
 use std::time::Duration;
 use tokio::time::sleep;
 
+/// Абсолютный путь к бинарю `tmux`. GUI-приложение из /Applications наследует
+/// урезанный launchd-PATH (`/usr/bin:/bin:/usr/sbin:/sbin`) без Homebrew —
+/// поэтому голый `tmux` не находится (exit 127), `pane_alive` возвращает false,
+/// и любая вставка падает в «Сессия не в tmux». Ищем бинарь по PATH процесса +
+/// типовым каталогам Homebrew (как resolve_claude_bin для claude) и кэшируем.
+fn tmux_bin() -> &'static str {
+    static BIN: OnceLock<String> = OnceLock::new();
+    BIN.get_or_init(|| {
+        let mut dirs: Vec<std::path::PathBuf> = std::env::var("PATH")
+            .unwrap_or_default()
+            .split(':')
+            .filter(|s| !s.is_empty())
+            .map(std::path::PathBuf::from)
+            .collect();
+        for extra in ["/opt/homebrew/bin", "/usr/local/bin"] {
+            let p = std::path::PathBuf::from(extra);
+            if !dirs.contains(&p) {
+                dirs.push(p);
+            }
+        }
+        for d in dirs {
+            let p = d.join("tmux");
+            if p.is_file() {
+                return p.to_string_lossy().into_owned();
+            }
+        }
+        "tmux".to_string() // не нашли — пусть падает как раньше (диагностируемо)
+    })
+}
+
 /// `tmux -L jarvis <args>`: stdout при успехе, текст ошибки при провале.
 pub async fn tmux_j(args: &[&str]) -> Result<String, String> {
-    let mut cmd = tokio::process::Command::new("tmux");
+    let mut cmd = tokio::process::Command::new(tmux_bin());
     cmd.arg("-L")
         .arg("jarvis")
         .args(args)
@@ -92,6 +123,10 @@ pub struct PaneInfo {
     pub session_name: String,
     pub cwd: String,
     pub pid: i64,
+    /// `pane_current_command` — имя процесса на переднем плане паны. По нему
+    /// узнаём codex-паны (шим оборачивает codex в tmux до того, как codex
+    /// пришлёт первый хук), чтобы завести провизорную сессию заранее.
+    pub command: String,
 }
 
 /// Живые паны сервера jarvis с метаданными (id, имя сессии, cwd, pid процесса
@@ -100,14 +135,14 @@ pub struct PaneInfo {
 /// Разделитель полей — таб: ни id, ни имя сессии, ни pid его не содержат, а путь
 /// идёт последним полем.
 pub async fn list_panes_meta() -> Result<Option<Vec<PaneInfo>>, ()> {
-    let mut cmd = tokio::process::Command::new("tmux");
+    let mut cmd = tokio::process::Command::new(tmux_bin());
     cmd.args([
         "-L",
         "jarvis",
         "list-panes",
         "-a",
         "-F",
-        "#{pane_id}\t#{session_name}\t#{pane_pid}\t#{pane_current_path}",
+        "#{pane_id}\t#{session_name}\t#{pane_pid}\t#{pane_current_command}\t#{pane_current_path}",
     ])
     .stdin(Stdio::null())
     .stdout(Stdio::piped())
@@ -118,19 +153,21 @@ pub async fn list_panes_meta() -> Result<Option<Vec<PaneInfo>>, ()> {
             String::from_utf8_lossy(&out.stdout)
                 .lines()
                 .filter_map(|line| {
-                    let mut it = line.splitn(4, '\t');
+                    let mut it = line.splitn(5, '\t');
                     let pane_id = it.next()?.trim();
                     if pane_id.is_empty() {
                         return None;
                     }
                     let session_name = it.next().unwrap_or("").trim().to_string();
                     let pid = it.next().unwrap_or("").trim().parse::<i64>().unwrap_or(0);
+                    let command = it.next().unwrap_or("").trim().to_string();
                     let cwd = it.next().unwrap_or("").trim().to_string();
                     Some(PaneInfo {
                         pane_id: pane_id.to_string(),
                         session_name,
                         cwd,
                         pid,
+                        command,
                     })
                 })
                 .collect(),
@@ -253,14 +290,14 @@ pub fn answer_keys(agent: crate::backend::Agent, q: &crate::model::Question, ans
 
 /// Фокус-лесенка, ступень tmux: switch-client, не вышло — select-window.
 pub async fn focus(pane: &str) -> bool {
-    let direct = tokio::process::Command::new("tmux")
+    let direct = tokio::process::Command::new(tmux_bin())
         .args(["switch-client", "-t", pane])
         .output()
         .await;
     if matches!(&direct, Ok(o) if o.status.success()) {
         return true;
     }
-    let select = tokio::process::Command::new("tmux")
+    let select = tokio::process::Command::new(tmux_bin())
         .args(["select-window", "-t", pane])
         .output()
         .await;

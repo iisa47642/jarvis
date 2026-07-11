@@ -110,6 +110,11 @@ pub struct Daemon {
     /// Время последнего РЕАЛЬНОГО prompt-события (хук UserPromptSubmit), мс.
     /// Так подтверждаем доставку ответа из Jarvis: хук сработал → текст дошёл.
     last_prompt_at: Mutex<HashMap<String, i64>>,
+    /// pid codex-пан, убранных юзером через «очистить завершённые». Пока codex-
+    /// процесс жив, `pane_sweep` не заводит для них провизорную сессию заново
+    /// (иначе очистка не срабатывала бы для залежавшихся codex). Чистится, когда
+    /// процесс закрыт (pid пропал из живых пан).
+    dismissed_panes: Mutex<HashSet<i64>>,
     /// Сессия последнего уведомления — цель хоткея «Продолжить».
     last_session: Mutex<Option<String>>,
     /// Последнее уведомление — для хоткея «повторить» (пере-показ + переозвучка).
@@ -241,6 +246,7 @@ impl Daemon {
             persist_pending: AtomicBool::new(false),
             busy: Mutex::new(HashSet::new()),
             last_prompt_at: Mutex::new(HashMap::new()),
+            dismissed_panes: Mutex::new(HashSet::new()),
             last_session: Mutex::new(None),
             last_toast: Mutex::new(None),
             voice,
@@ -1673,6 +1679,43 @@ impl Daemon {
         }
     }
 
+    /// Быстрый проход по живым tmux-панам (раз в 5с): чинит потерянную привязку
+    /// сессий по pid и заводит провизорные сессии для codex-пан без хука (codex
+    /// молчит до первого сообщения). Логика чистая — в `reconcile_panes`.
+    /// tmux нет/ошибка → Ok(None): реестр не трогаем (провизорных не плодим).
+    pub async fn pane_sweep(self: &std::sync::Arc<Self>) {
+        let Ok(Some(panes)) = tmux::list_panes_meta().await else {
+            return;
+        };
+        let now = now_ms();
+        // Снять из «отклонённых» pid, чьи codex-процессы уже закрыты (пана ушла):
+        // новый codex на новом pid снова покажется, а закрытый не воскреснет.
+        let dismissed = {
+            let live: HashSet<i64> = panes.iter().map(|p| p.pid).collect();
+            let mut d = self.dismissed_panes.lock().unwrap();
+            d.retain(|pid| live.contains(pid));
+            d.clone()
+        };
+        let changed = {
+            let mut sessions = self.sessions.lock().unwrap();
+            reconcile_panes(&mut sessions, &panes, &dismissed, now)
+        };
+        if changed {
+            self.push();
+        }
+    }
+
+    /// Пометить codex-паны убранных сессий «отклонёнными», чтобы `pane_sweep` не
+    /// воскрешал их провизорными, пока codex-процесс жив. Зовётся из state_clear.
+    pub fn dismiss_panes(&self, pids: impl IntoIterator<Item = i64>) {
+        let mut d = self.dismissed_panes.lock().unwrap();
+        for pid in pids {
+            if pid > 0 {
+                d.insert(pid);
+            }
+        }
+    }
+
     /* ================= диагностика / метрики ================= */
     /* Режим логов из настроек: периодически пишем в jarvis.log RAM/CPU демона и
      * Silero-сайдкара + счётчики, чтобы потом собрать и разобрать. */
@@ -2101,9 +2144,108 @@ fn evict_pane(sessions: &mut HashMap<String, Session>, keep_sid: &str, pane: &st
     ghosts
 }
 
+/// Имя процесса на переднем плане паны указывает на codex? tmux отдаёт
+/// `pane_current_command` (напр. усечённый бинарь "codex-aarch64-a") — матчим
+/// по подстроке, регистронезависимо.
+fn is_codex_pane(command: &str) -> bool {
+    command.to_ascii_lowercase().contains("codex")
+}
+
+/// Починка привязки сессий к живым tmux-панам + обнаружение codex-пан без хука.
+/// Чистая (тестируется без демона, как evict_pane); true — что-то изменилось.
+///
+/// Три шага по порядку:
+///  1. Починка: живой сессии с pid, но без ЖИВОЙ паны, ставим пану по
+///     `pane_pid == pid`. Шим запускает агента через `exec` → он и есть корневой
+///     процесс паны, значит pane_pid == pid хука. Чинит codex, теряющий
+///     `$TMUX_PANE` (особенно на resume, где старая пана уже мертва).
+///  2. Дедуп: провизорную сессию, делящую pid с реальной, снимаем — реальный
+///     хук пришёл, провизорная своё отслужила.
+///  3. Обнаружение: для codex-паны, за которой нет ни одной сессии, заводим
+///     провизорную (codex молчит до первого сообщения — иначе он не виден в UI,
+///     и в него нельзя написать первым из Jarvis).
+fn reconcile_panes(
+    sessions: &mut HashMap<String, Session>,
+    panes: &[crate::tmux::PaneInfo],
+    dismissed: &HashSet<i64>,
+    now: i64,
+) -> bool {
+    let mut changed = false;
+    let live_panes: HashSet<&str> = panes.iter().map(|p| p.pane_id.as_str()).collect();
+
+    // 1) починка привязки по pid
+    for s in sessions.values_mut() {
+        let Some(pid) = s.pid.filter(|p| *p > 0) else { continue };
+        let has_live_pane = s.tmux_pane.as_deref().is_some_and(|p| live_panes.contains(p));
+        if has_live_pane {
+            continue;
+        }
+        if let Some(pi) = panes.iter().find(|pi| pi.pid == pid) {
+            if s.tmux_pane.as_deref() != Some(pi.pane_id.as_str()) {
+                s.tmux_pane = Some(pi.pane_id.clone());
+                changed = true;
+            }
+        }
+    }
+
+    // 2) дедуп провизорных против реальных по pid
+    let real_pids: HashSet<i64> = sessions
+        .values()
+        .filter(|s| !s.provisional)
+        .filter_map(|s| s.pid.filter(|p| *p > 0))
+        .collect();
+    let before = sessions.len();
+    sessions.retain(|_, s| !(s.provisional && s.pid.is_some_and(|p| real_pids.contains(&p))));
+    if sessions.len() != before {
+        changed = true;
+    }
+
+    // 3) обнаружение codex-пан без своей сессии
+    let owned_pids: HashSet<i64> = sessions.values().filter_map(|s| s.pid.filter(|p| *p > 0)).collect();
+    let owned_panes: HashSet<String> = sessions.values().filter_map(|s| s.tmux_pane.clone()).collect();
+    for pi in panes {
+        if pi.pid <= 0 || !is_codex_pane(&pi.command) {
+            continue;
+        }
+        if owned_pids.contains(&pi.pid) || owned_panes.contains(&pi.pane_id) {
+            continue;
+        }
+        if dismissed.contains(&pi.pid) {
+            continue; // юзер убрал эту codex-пану — не воскрешаем, пока жива
+        }
+        let id = format!("codex-pane-{}", pi.pid);
+        if sessions.contains_key(&id) {
+            continue;
+        }
+        let mut s = Session::new(id.clone(), now);
+        s.agent = Some("codex".into());
+        s.tmux_pane = Some(pi.pane_id.clone());
+        s.pid = Some(pi.pid);
+        s.cwd = Some(pi.cwd.clone());
+        s.project = Some(basename(&pi.cwd));
+        s.status = Status::Idle;
+        s.detail = "запущен — ждёт первого сообщения".into();
+        s.provisional = true;
+        sessions.insert(id, s);
+        changed = true;
+    }
+
+    changed
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn pane(id: &str, pid: i64, command: &str) -> crate::tmux::PaneInfo {
+        crate::tmux::PaneInfo {
+            pane_id: id.to_string(),
+            session_name: "s".into(),
+            cwd: "/Users/x/proj".into(),
+            pid,
+            command: command.to_string(),
+        }
+    }
 
     fn sess(id: &str, pane: Option<&str>) -> Session {
         let mut s = Session::new(id.to_string(), 0);
@@ -2137,6 +2279,86 @@ mod tests {
 
         assert!(evicted.is_empty());
         assert_eq!(m.len(), 2, "две параллельные сессии в разных панах живут обе");
+    }
+
+    #[test]
+    fn is_codex_pane_matches_codex_only() {
+        assert!(is_codex_pane("codex-aarch64-a"));
+        assert!(is_codex_pane("Codex"));
+        assert!(!is_codex_pane("claude"));
+        assert!(!is_codex_pane("node"));
+        assert!(!is_codex_pane("zsh"));
+    }
+
+    #[test]
+    fn reconcile_panes_discovers_codex_without_session() {
+        let mut m = HashMap::new();
+        let panes = vec![pane("%4", 7061, "codex-aarch64-a"), pane("%9", 1234, "claude")];
+        let changed = reconcile_panes(&mut m, &panes, &HashSet::new(), 100);
+        assert!(changed);
+        // codex-пану завели провизорной; claude-пану — нет (claude виден сам).
+        let prov: Vec<_> = m.values().filter(|s| s.provisional).collect();
+        assert_eq!(prov.len(), 1, "ровно одна провизорная — для codex");
+        let s = &prov[0];
+        assert_eq!(s.tmux_pane.as_deref(), Some("%4"));
+        assert_eq!(s.pid, Some(7061));
+        assert_eq!(s.agent.as_deref(), Some("codex"));
+    }
+
+    #[test]
+    fn reconcile_panes_idempotent_no_duplicate_provisional() {
+        let mut m = HashMap::new();
+        let panes = vec![pane("%4", 7061, "codex-aarch64-a")];
+        assert!(reconcile_panes(&mut m, &panes, &HashSet::new(), 100));
+        // второй прогон по тем же панам ничего не меняет
+        assert!(!reconcile_panes(&mut m, &panes, &HashSet::new(), 200));
+        assert_eq!(m.values().filter(|s| s.provisional).count(), 1);
+    }
+
+    #[test]
+    fn reconcile_panes_real_hook_evicts_provisional_by_pid() {
+        let mut m = HashMap::new();
+        let panes = vec![pane("%4", 7061, "codex-aarch64-a")];
+        reconcile_panes(&mut m, &panes, &HashSet::new(), 100); // провизорная codex-pane-7061
+
+        // пришёл настоящий хук: реальная сессия с тем же pid (codex == pane_pid)
+        let mut real = sess("019f-real", None);
+        real.pid = Some(7061);
+        m.insert("019f-real".into(), real);
+
+        let changed = reconcile_panes(&mut m, &panes, &HashSet::new(), 300);
+        assert!(changed);
+        assert!(!m.contains_key("codex-pane-7061"), "провизорная снята по pid");
+        assert!(m.contains_key("019f-real"), "реальная сессия осталась");
+        // и ей починили пану по pid
+        assert_eq!(m["019f-real"].tmux_pane.as_deref(), Some("%4"));
+    }
+
+    #[test]
+    fn reconcile_panes_skips_dismissed_codex_pane() {
+        // Юзер убрал codex-пану через «очистить завершённые» → её pid в dismissed.
+        // pane_sweep не должен воскрешать провизорную, пока codex жив.
+        let mut m = HashMap::new();
+        let panes = vec![pane("%4", 7061, "codex-aarch64-a")];
+        let mut dismissed = HashSet::new();
+        dismissed.insert(7061i64);
+        let changed = reconcile_panes(&mut m, &panes, &dismissed, 100);
+        assert!(!changed, "отклонённую codex-пану не воскрешаем");
+        assert!(m.is_empty());
+    }
+
+    #[test]
+    fn reconcile_panes_repairs_lost_pane_by_pid() {
+        let mut m = HashMap::new();
+        // сессия жива (pid есть), но пана устарела/потеряна (%9 нет в списке)
+        let mut s = sess("codex-x", Some("%9"));
+        s.pid = Some(7061);
+        m.insert("codex-x".into(), s);
+        let panes = vec![pane("%4", 7061, "codex-aarch64-a")]; // живая пана того же pid
+
+        let changed = reconcile_panes(&mut m, &panes, &HashSet::new(), 100);
+        assert!(changed);
+        assert_eq!(m["codex-x"].tmux_pane.as_deref(), Some("%4"), "пану перепривязали по pid");
     }
 
     #[test]

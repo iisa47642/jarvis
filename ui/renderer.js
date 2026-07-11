@@ -1133,7 +1133,9 @@ async function openChat(sessionId, project) {
   } else {
     const empty = document.createElement('div');
     empty.className = 'chatempty';
-    empty.textContent = 'Пока пусто — новые реплики появятся здесь по мере работы агента.';
+    empty.textContent = res.provisional
+      ? 'Новая codex-сессия — она ещё не слала событий. Напиши первое сообщение, и диалог начнётся здесь.'
+      : 'Пока пусто — новые реплики появятся здесь по мере работы агента.';
     chatlogEl.appendChild(empty);
   }
 }
@@ -2921,6 +2923,10 @@ tabSettingsEl.addEventListener('click', () => {
   if (view === 'settings') { setView('list'); render(); } else setView('settings');
 });
 
+document.getElementById('tabFullscreen')?.addEventListener('click', () => {
+  window.jarvis.toggleFullscreen?.();
+});
+
 // кнопка «Открыть настройки» из окна онбординга
 window.jarvis.onGotoSettings(() => setView('settings'));
 window.jarvis.onGotoVoicehist(() => setView('voicehist'));
@@ -3929,6 +3935,12 @@ window.addEventListener('keydown', async (e) => {
   if (e.metaKey && e.key === ',') { // ⌘, — настройки, как в macOS
     e.preventDefault();
     if (view === 'settings') { setView('list'); render(); } else setView('settings');
+    return;
+  }
+
+  if (e.metaKey && e.shiftKey && (e.key === 'f' || e.key === 'F')) { // ⌘⇧F — фуллскрин панели (⌃⌘F перехватывает macOS)
+    e.preventDefault();
+    window.jarvis.toggleFullscreen?.();
     return;
   }
 

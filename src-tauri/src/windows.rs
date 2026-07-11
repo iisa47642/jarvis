@@ -214,10 +214,30 @@ pub fn toast_add(
 /// Панель — на дисплей с курсором (геометрия — в macos::place_panel:
 /// AppKit-поинты, без конвертаций Tauri, иначе на смешанном DPI окно
 /// уезжает на предыдущий экран).
+/// Панель развёрнута на весь экран? Живёт весь срок демона; сбрасывается при
+/// обычном позиционировании (показ/переезд), чтобы reshow был нормального размера.
+static PANEL_FULL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 pub fn position_panel(d: &Arc<Daemon>) {
+    PANEL_FULL.store(false, std::sync::atomic::Ordering::SeqCst);
     let Some(panel) = d.app.get_webview_window("main") else { return };
     let corner = d.settings.string("position") == "corner";
     macos::place_panel(&panel, PANEL_W, PANEL_H, corner);
+}
+
+/// ⌃⌘F: переключить панель между обычным размером и фуллскрином. Возвращает
+/// новое состояние (true — развёрнута).
+pub fn toggle_panel_fullscreen(d: &Arc<Daemon>) -> bool {
+    use std::sync::atomic::Ordering;
+    let Some(panel) = d.app.get_webview_window("main") else { return false };
+    let now_full = !PANEL_FULL.load(Ordering::SeqCst);
+    if now_full {
+        PANEL_FULL.store(true, Ordering::SeqCst);
+        macos::place_panel_full(&panel);
+    } else {
+        position_panel(d); // сам сбросит флаг в false
+    }
+    now_full
 }
 
 /// Тихий режим: трей, клик по уведомлению — показать, не забирая фокус

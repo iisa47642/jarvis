@@ -131,6 +131,11 @@ pub struct Session {
     pub tmux_pane: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tmux_name: Option<String>,
+    /// Провизорная сессия, заведённая по живой tmux-пане ДО первого хука.
+    /// Codex молчит до первого сообщения — без этого его сессия не видна в UI.
+    /// Заменяется реальной, когда придёт хук с настоящим session_id (дедуп по pid).
+    #[serde(default)]
+    pub provisional: bool,
     /// TERM_PROGRAM / TERMINAL_EMULATOR терминала, где живёт сессия.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub host: Option<String>,

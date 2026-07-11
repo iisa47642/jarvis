@@ -143,6 +143,19 @@ pub fn place_panel(win: &WebviewWindow, w: f64, h: f64, corner: bool) {
     });
 }
 
+/// Развернуть панель на всю рабочую область экрана под курсором (фуллскрин-режим
+/// без смены Space: просто весь visibleFrame — меню-бар и док остаются).
+pub fn place_panel_full(win: &WebviewWindow) {
+    on_main(win, move |window| unsafe {
+        let Some(vf) = work_area_under_cursor() else { return };
+        let frame = CGRect {
+            origin: CGPoint { x: vf.origin.x, y: vf.origin.y },
+            size: CGSize { width: vf.size.width, height: vf.size.height },
+        };
+        let _: () = msg_send![window, setFrame: frame, display: true];
+    });
+}
+
 /// Один тик слежения за курсором над окном тостов.
 ///
 /// WKWebView не шлёт mouseenter/:hover, пока наше приложение неактивно, — а

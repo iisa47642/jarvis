@@ -41,16 +41,33 @@ pub fn state_get(app: AppHandle) -> Value {
 #[tauri::command]
 pub fn state_clear(app: AppHandle) {
     let d = Daemon::get(&app);
-    d.sessions
-        .lock()
-        .unwrap()
-        .retain(|_, s| !matches!(s.status, Status::Done | Status::Idle));
+    {
+        let mut sessions = d.sessions.lock().unwrap();
+        // codex-паны убираемых сессий помечаем «отклонёнными» — иначе pane_sweep
+        // тут же воскресит их провизорными (codex-процесс ещё жив), и очистка
+        // залежавшихся codex не сработала бы.
+        let dismiss: Vec<i64> = sessions
+            .values()
+            .filter(|s| matches!(s.status, Status::Done | Status::Idle))
+            .filter(|s| s.provisional || s.agent.as_deref() == Some("codex"))
+            .filter_map(|s| s.pid.filter(|_| s.tmux_pane.is_some()))
+            .collect();
+        d.dismiss_panes(dismiss);
+        sessions.retain(|_, s| !matches!(s.status, Status::Done | Status::Idle));
+    }
     d.push();
 }
 
 #[tauri::command]
 pub fn panel_hide(app: AppHandle) {
     windows::hide_panel(&Daemon::get(&app));
+}
+
+/// ⌃⌘F из панели — развернуть на весь экран / вернуть обычный размер.
+#[tauri::command]
+pub fn panel_toggle_fullscreen(app: AppHandle) -> Value {
+    let full = windows::toggle_panel_fullscreen(&Daemon::get(&app));
+    json!({ "ok": true, "full": full })
 }
 
 /* ================= настройки ================= */
@@ -769,6 +786,17 @@ pub fn chat_open(app: AppHandle, session_id: String) -> Value {
         return err("Сессия не найдена");
     };
     let Some(tr) = s.transcript else {
+        // Провизорная codex-сессия ещё не создала транскрипт (codex молчит до
+        // первого сообщения). Открываем пустой чат — юзер сможет написать первое
+        // сообщение прямо отсюда: reply_core знает про provisional и вставит его
+        // в пану, а хук codex затем заменит запись на реальную.
+        if s.provisional {
+            return json!({
+                "ok": true, "items": [], "spans": [], "cards": {},
+                "llm": claude_bin::any_service_bin(), "project": s.project,
+                "provisional": true
+            });
+        }
         return err("Нет транскрипта — сессия ещё не слала событий (перезапусти claude)");
     };
     // Парсер транскрипта — по бэкенду сессии (Claude JSONL vs Codex rollout).
@@ -1398,6 +1426,18 @@ pub(crate) async fn reply_core(d: &Arc<Daemon>, session_id: String, text: String
 
     if let Some(pane) = s.tmux_pane {
         if tmux::pane_alive(&pane).await {
+            // Провизорная сессия (codex, обнаруженная по пане до первого хука):
+            // ack придёт на РЕАЛЬНЫЙ session_id, которого мы ещё не знаем, а
+            // pane_sweep вот-вот заменит эту запись реальной. Поэтому вставляем
+            // ровно один раз, без ожидания ack и без ретрая (иначе задвоим
+            // первое сообщение). Сама вставка отправит codex первый промпт.
+            if s.provisional {
+                if let Err(e) = tmux::reply(&pane, &prompt).await {
+                    return err(format!("tmux: {}", ellipsize(&one_line(&e), 120)));
+                }
+                return json!({ "ok": true, "channel": "tmux", "provisional": true });
+            }
+
             // Занята ли сессия в момент отправки. Если да — Claude Code положит
             // наш ввод в СВОЮ очередь, а prompt-хук придёт лишь когда он до него
             // дойдёт (после текущего ответа). Быстрый ack тогда невозможен — это

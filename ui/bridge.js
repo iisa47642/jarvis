@@ -17,6 +17,7 @@
     getState: () => invoke('state_get'),
     clearFinished: () => invoke('state_clear'),
     hidePanel: () => invoke('panel_hide'),
+    toggleFullscreen: () => invoke('panel_toggle_fullscreen'),
     getSettings: () => invoke('settings_get'),
     setSettings: (patch) => invoke('settings_set', { patch }),
     openChat: (sessionId) => invoke('chat_open', { sessionId }),

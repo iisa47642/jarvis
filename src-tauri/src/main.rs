@@ -117,6 +117,7 @@ fn main() {
             ipc::state_get,
             ipc::state_clear,
             ipc::panel_hide,
+            ipc::panel_toggle_fullscreen,
             ipc::settings_get,
             ipc::settings_set,
             ipc::chat_open,
@@ -325,16 +326,22 @@ fn main() {
                     api.prevent_close();
                     let _ = window.hide();
                 }
-                // клик вне панели — спрятать. Но с задержкой и перепроверкой:
+                // клик вне панели — спрятать, НО только если включена настройка
+                // `autoHidePanel` (по умолчанию выключена: панель держится, пока
+                // её явно не закрыть — ⌘J/⌘W/крестик). С задержкой и перепроверкой:
                 // навигация стрелками перерисовывает DOM (render() пересоздаёт и
                 // рефокусит queryEl), отчего WKWebView даёт ложный blur→focus за
                 // один кадр. Гасим только если фокус реально ушёл из приложения и
                 // не вернулся за 120 мс — иначе панель моргала бы на каждой стрелке.
                 tauri::WindowEvent::Focused(false) => {
+                    let app = window.app_handle().clone();
                     let w = window.clone();
                     std::thread::spawn(move || {
                         std::thread::sleep(std::time::Duration::from_millis(120));
-                        if !w.is_focused().unwrap_or(false) && w.is_visible().unwrap_or(false) {
+                        if Daemon::get(&app).settings.bool("autoHidePanel")
+                            && !w.is_focused().unwrap_or(false)
+                            && w.is_visible().unwrap_or(false)
+                        {
                             let _ = w.hide();
                         }
                     });
@@ -366,6 +373,16 @@ fn spawn_timers(d: &Arc<Daemon>) {
         loop {
             dd.reconcile_sessions().await;
             tokio::time::sleep(Duration::from_secs(30)).await;
+        }
+    });
+
+    // проход по tmux-панам (раз в 5с): починка привязки по pid + провизорные
+    // сессии для codex-пан (codex не шлёт хук до первого сообщения)
+    let dd = d.clone();
+    tauri::async_runtime::spawn(async move {
+        loop {
+            dd.pane_sweep().await;
+            tokio::time::sleep(Duration::from_secs(5)).await;
         }
     });
 
