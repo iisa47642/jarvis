@@ -1396,23 +1396,18 @@ fn has_block(content: &str) -> bool {
 /// Вставить или заменить блок. Идемпотентно.
 fn merge_block(content: &str, shims_dir: &str) -> String {
     let block = block_body(shims_dir);
-    if has_block(content) {
-        let re = regex::Regex::new(&format!(
-            "{}[\\s\\S]*?{}",
-            regex::escape(BEGIN),
-            regex::escape(END)
-        ))
-        .unwrap();
-        return re
-            .replace_all(content, regex::NoExpand(block.as_str()))
-            .into_owned();
-    }
-    let sep = if !content.is_empty() && !content.ends_with('\n') {
-        "\n"
+    // PATH правят не только мы: pipx/Bun/Antigravity часто дописывают свои
+    // `export PATH=...:$PATH` ниже нашего блока и тем самым обходят shim.
+    // Поэтому при каждом repair/install переносим managed-блок в конец файла:
+    // он выполняется последним и гарантированно ставит ~/.jarvis/shims первым.
+    let base = if has_block(content) {
+        remove_block(content)
     } else {
-        ""
+        content.to_string()
     };
-    format!("{content}{sep}\n{block}\n")
+    let base = base.trim_end_matches('\n');
+    let sep = if base.is_empty() { "" } else { "\n\n" };
+    format!("{base}{sep}{block}\n")
 }
 
 /// Убрать блок вместе с окружающими пустыми строками.
@@ -2592,6 +2587,24 @@ mod tests {
             "устаревший блок заменяется"
         );
         assert_eq!(refreshed.matches(BEGIN).count(), 1, "блок ровно один");
+    }
+
+    #[test]
+    fn merge_moves_block_to_end_so_later_path_exports_do_not_win() {
+        let existing = format!(
+            "export PATH=\"/opt/homebrew/bin:$PATH\"\n{}\nexport PATH=\"$HOME/.local/bin:$PATH\"\n",
+            block_body("/old/path")
+        );
+        let merged = merge_block(&existing, DIR);
+        assert_eq!(merged.matches(BEGIN).count(), 1, "блок ровно один");
+        assert!(
+            merged.trim_end().ends_with(END),
+            "managed-блок должен быть последним"
+        );
+        assert!(
+            merged.contains("export PATH=\"$HOME/.local/bin:$PATH\"\n\n# >>> jarvis >>>"),
+            "чужой PATH-export остаётся выше Jarvis-блока"
+        );
     }
 
     #[test]
