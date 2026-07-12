@@ -198,13 +198,22 @@ pub fn toast_add(
     question: Option<&serde_json::Value>,
     meta: &serde_json::Value,
 ) {
+    // Срок жизни карточки — из настроек (notify.ttlSec: 5/8/0). 0 = «Не прятать»
+    // (липко). Раньше toast.js жил на захардкоженных 8с и настройку игнорировал.
+    let ttl_ms = d
+        .settings
+        .load()
+        .pointer("/notify/ttlSec")
+        .and_then(serde_json::Value::as_i64)
+        .map(|s| s.max(0) * 1000)
+        .unwrap_or(8000);
     toast_emit(
         d,
         "toast-add",
         json!({
             "id": id, "title": title, "body": body,
             "sessionId": session_id, "kind": kind, "question": question,
-            "meta": meta,
+            "meta": meta, "ttlMs": ttl_ms,
         }),
     );
 }
@@ -217,19 +226,61 @@ pub fn toast_add(
 /// Панель развёрнута на весь экран? Живёт весь срок демона; сбрасывается при
 /// обычном позиционировании (показ/переезд), чтобы reshow был нормального размера.
 static PANEL_FULL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Оконный режим панели (настройка panelWindowed): обычное macOS-окно —
+/// двигается за шапку, ресайзится, живёт на своём экране/Space и НЕ следует
+/// за курсором. false — исходный оверлей поверх всего.
+static PANEL_WINDOWED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static PANEL_MODE_APPLIED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn panel_is_windowed() -> bool {
+    PANEL_WINDOWED.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Применить режим окна из настроек — при показе панели и при переключении.
+pub fn sync_panel_windowed(d: &Arc<Daemon>) {
+    use std::sync::atomic::Ordering;
+    let want = d.settings.bool("panelWindowed");
+    let applied_before = PANEL_MODE_APPLIED.swap(true, Ordering::SeqCst);
+    if applied_before && PANEL_WINDOWED.load(Ordering::SeqCst) == want {
+        return;
+    }
+    PANEL_WINDOWED.store(want, Ordering::SeqCst);
+    let Some(panel) = d.app.get_webview_window("main") else { return };
+    if want {
+        let _ = panel.set_resizable(true);
+        macos::make_regular_window(&panel);
+    } else {
+        let _ = panel.set_fullscreen(false); // выйти из нативного фуллскрина
+        let _ = panel.set_resizable(false);
+        macos::float_above_everything(&panel);
+        PANEL_FULL.store(false, Ordering::SeqCst);
+        let corner = d.settings.string("position") == "corner";
+        macos::place_panel(&panel, PANEL_W, PANEL_H, corner);
+    }
+}
 
 pub fn position_panel(d: &Arc<Daemon>) {
+    // оконный режим: позицию/размер выбирает юзер — не перетаскиваем окно
+    // на дисплей с курсором при каждом показе
+    if panel_is_windowed() {
+        return;
+    }
     PANEL_FULL.store(false, std::sync::atomic::Ordering::SeqCst);
     let Some(panel) = d.app.get_webview_window("main") else { return };
     let corner = d.settings.string("position") == "corner";
     macos::place_panel(&panel, PANEL_W, PANEL_H, corner);
 }
 
-/// ⌃⌘F: переключить панель между обычным размером и фуллскрином. Возвращает
-/// новое состояние (true — развёрнута).
+/// ⌘⇧F: оверлей — растянуть до рабочей области и обратно; оконный режим —
+/// настоящий нативный фуллскрин macOS (своё Space). Возвращает новое состояние.
 pub fn toggle_panel_fullscreen(d: &Arc<Daemon>) -> bool {
     use std::sync::atomic::Ordering;
     let Some(panel) = d.app.get_webview_window("main") else { return false };
+    if panel_is_windowed() {
+        let full = !panel.is_fullscreen().unwrap_or(false);
+        let _ = panel.set_fullscreen(full);
+        return full;
+    }
     let now_full = !PANEL_FULL.load(Ordering::SeqCst);
     if now_full {
         PANEL_FULL.store(true, Ordering::SeqCst);
@@ -249,6 +300,7 @@ pub fn show_panel(d: &Arc<Daemon>) {
         return;
     }
     let Some(panel) = d.app.get_webview_window("main") else { return };
+    sync_panel_windowed(d);
     position_panel(d);
     emit_to_panel(&d.app, "panel-shown", &json!(null));
     macos::show_inactive(&panel);
@@ -262,6 +314,7 @@ pub fn show_panel_focused(d: &Arc<Daemon>) {
         return;
     }
     let Some(panel) = d.app.get_webview_window("main") else { return };
+    sync_panel_windowed(d);
     position_panel(d);
     emit_to_panel(&d.app, "panel-shown", &json!(null));
     let _ = panel.show();

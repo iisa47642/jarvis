@@ -59,6 +59,8 @@ pub fn to_chat_items(entry: &Value) -> Vec<ChatItem> {
                     kind: "text",
                     text: text.to_string(),
                     ts,
+                    diff: None,
+                    stat: None,
                 });
             }
             out
@@ -74,6 +76,8 @@ pub fn to_chat_items(entry: &Value) -> Vec<ChatItem> {
                 kind: "tool",
                 text: tool_label(name, args.as_ref()),
                 ts,
+                diff: None,
+                stat: None,
             }]
         }
         Some("custom_tool_call") => {
@@ -83,11 +87,17 @@ pub fn to_chat_items(entry: &Value) -> Vec<ChatItem> {
                 .and_then(Value::as_str)
                 .unwrap_or("инструмент");
             let input = payload.get("input").and_then(Value::as_str);
+            let (diff, stat) = match input.filter(|_| name == "apply_patch").and_then(patch_diff) {
+                Some((d, s)) => (Some(d), Some(s)),
+                None => (None, None),
+            };
             vec![ChatItem {
                 role: "assistant",
                 kind: "tool",
                 text: custom_tool_label(name, input),
                 ts,
+                diff,
+                stat,
             }]
         }
         _ => vec![], // reasoning, function_call_output, ...
@@ -220,6 +230,44 @@ fn web_tool_label(args: Option<&Value>) -> Option<String> {
         return Some(label_with_hint("WebFetch", Some(target.to_string())));
     }
     None
+}
+
+/// apply_patch-инпут → (дифф ±строк, сводка «+N −M») для карточки правки в чате.
+/// Формат патча уже несёт префиксы +/-: берём их, служебные «*** …»/«@@» — мимо.
+fn patch_diff(input: &str) -> Option<(String, String)> {
+    const MAX_LINES: usize = 160;
+    let mut out = String::new();
+    let (mut added, mut removed, mut lines) = (0usize, 0usize, 0usize);
+    for l in input.lines() {
+        if l.starts_with("***") || l.starts_with("@@") {
+            continue;
+        }
+        let sign = l.chars().next();
+        if sign == Some('+') {
+            added += 1;
+        } else if sign == Some('-') {
+            removed += 1;
+        } else {
+            continue; // контекстные строки не показываем — карточка компактнее
+        }
+        lines += 1;
+        if lines <= MAX_LINES {
+            out.push_str(&ellipsize(l, 300));
+            out.push('\n');
+        }
+    }
+    if added == 0 && removed == 0 {
+        return None;
+    }
+    if lines > MAX_LINES {
+        out.push_str(&format!("… ещё {} строк\n", lines - MAX_LINES));
+    }
+    let stat = if removed == 0 {
+        format!("+{added}")
+    } else {
+        format!("+{added} −{removed}")
+    };
+    Some((out, stat))
 }
 
 fn patch_file_hint(input: &str) -> Option<String> {
@@ -381,6 +429,9 @@ mod tests {
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].kind, "tool");
         assert_eq!(items[0].text, "Edit · ui/renderer.js");
+        // ±дифф для карточки правки: строки патча как есть, служебные — мимо
+        assert_eq!(items[0].diff.as_deref(), Some("-old\n+new\n"));
+        assert_eq!(items[0].stat.as_deref(), Some("+1 −1"));
     }
 
     #[test]

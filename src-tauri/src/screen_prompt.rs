@@ -107,7 +107,8 @@ pub async fn detect_stuck_prompt(d: &Arc<Daemon>, sid: &str) {
     let tail: Vec<&str> = lines.iter().rev().take(17).rev().copied().collect();
 
     let Some(prompt) = parse_screen(&tail) else {
-        // подтверждение ушло — снимаем экранный вопрос
+        // подтверждение ушло — снимаем экранный вопрос и его липкую карточку
+        // (ответили в терминале — тост не должен висеть дальше)
         let had_screen_q = s.question.as_ref().is_some_and(|q| q.from_screen);
         if had_screen_q && is_idle_screen(&tail.join("\n")) {
             d.with_session(sid, |s| {
@@ -115,29 +116,41 @@ pub async fn detect_stuck_prompt(d: &Arc<Daemon>, sid: &str) {
                 s.status = Status::Idle;
                 s.updated_at = now_ms();
             });
+            crate::windows::toast_remove(d, &format!("q-{sid}"));
             d.push();
         }
         return;
     };
 
+    // Заголовок вопроса + команда, на которую просят добро (last_cmd из
+    // pre-tool): «Do you want to proceed?» без команды бесполезен.
+    let q_text = match s.last_cmd.as_deref() {
+        Some(cmd) if prompt.title.to_lowercase().contains("do you want")
+            || prompt.title.to_lowercase().contains("proceed") =>
+        {
+            format!("{} — $ {cmd}", prompt.title)
+        }
+        _ => prompt.title.clone(),
+    };
+
     // тот же вопрос уже на карточке — не дёргаем
     if let Some(q) = s.question.as_ref().filter(|q| q.from_screen) {
         if let Some(prev) = q.questions.first() {
-            if prev.question == prompt.title && prev.options.len() == prompt.options.len() {
+            if prev.question == q_text && prev.options.len() == prompt.options.len() {
                 return;
             }
         }
     }
 
     let project = s.project.clone().unwrap_or_else(|| "?".into());
-    let detail = ellipsize(&prompt.title, 140);
+    let detail = ellipsize(&q_text, 200);
     d.with_session(sid, |s| {
         s.status = Status::Waiting;
         s.question = Some(Question {
             from_screen: true,
             at: now_ms(),
             questions: vec![QuestionItem {
-                question: prompt.title.clone(),
+                question: q_text.clone(),
                 header: String::new(),
                 multi_select: prompt.multi,
                 options: prompt
@@ -154,7 +167,15 @@ pub async fn detect_stuck_prompt(d: &Arc<Daemon>, sid: &str) {
         s.detail = detail.clone();
     });
     if d.settings.bool("notifyWaiting") {
-        d.notify(&format!("{project} — спрашивает"), &detail, Some(sid), "waiting");
+        // стабильный id q-<sid>: заменяет карточку «Нужен пермишен» той же сессии
+        // (раньше — второй тост с новым id), снимается RemoveToast при ответе
+        d.notify_id(
+            &format!("q-{sid}"),
+            &format!("{project} — спрашивает"),
+            &detail,
+            Some(sid),
+            "waiting",
+        );
     }
     d.push();
     // Не пишем текст промпта в лог (конф. данные) — только факт и кол-во опций.

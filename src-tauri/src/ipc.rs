@@ -70,6 +70,19 @@ pub fn panel_toggle_fullscreen(app: AppHandle) -> Value {
     json!({ "ok": true, "full": full })
 }
 
+/// Оконный режим панели: обычное окно (двигать/ресайзить/свой экран) ↔ оверлей
+/// поверх всего. Настройка panelWindowed — переживает перезапуск.
+#[tauri::command]
+pub fn panel_toggle_windowed(app: AppHandle) -> Value {
+    let d = Daemon::get(&app);
+    let now = !d.settings.bool("panelWindowed");
+    let mut patch = serde_json::Map::new();
+    patch.insert("panelWindowed".into(), json!(now));
+    d.settings.save(patch);
+    windows::sync_panel_windowed(&d);
+    json!({ "ok": true, "windowed": now })
+}
+
 /* ================= настройки ================= */
 
 #[tauri::command]
@@ -802,9 +815,11 @@ pub fn chat_open(app: AppHandle, session_id: String) -> Value {
     // Парсер транскрипта — по бэкенду сессии (Claude JSONL vs Codex rollout).
     let agent = crate::backend::Agent::from_opt(s.agent.as_deref());
     let be = crate::backend::backend(agent);
-    let entries = be.read_entries(std::path::Path::new(&tr), 512 * 1024);
+    // 2МБ хвоста и 240 элементов (было 512КБ/80): длинные сессии обрывались
+    // слишком рано — прокрутить чат в прошлое было нельзя.
+    let entries = be.read_entries(std::path::Path::new(&tr), 2 * 1024 * 1024);
     let (all_items, turns) = crate::turns::segment(be, &entries);
-    let tail_start = all_items.len().saturating_sub(80);
+    let tail_start = all_items.len().saturating_sub(240);
     let items = &all_items[tail_start..];
     // разметка ходов в координатах видимого хвоста; факты — для дет-карточек
     let spans: Vec<Value> = turns

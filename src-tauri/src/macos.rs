@@ -66,6 +66,19 @@ pub fn float_above_everything(win: &WebviewWindow) {
     });
 }
 
+/// Обычное macOS-окно: системный уровень, живёт на СВОЁМ Space/экране (не
+/// следует за курсором по рабочим столам), участвует в Mission Control,
+/// зелёная кнопка/set_fullscreen — настоящий фуллскрин.
+/// NSWindowCollectionBehaviorManaged | NSWindowCollectionBehaviorFullScreenPrimary
+pub fn make_regular_window(win: &WebviewWindow) {
+    on_main(win, |w| unsafe {
+        let _: () = msg_send![w, setLevel: 0isize]; // NSNormalWindowLevel
+        let behavior: usize = (1 << 2) | (1 << 7);
+        let _: () = msg_send![w, setCollectionBehavior: behavior];
+        let _: () = msg_send![w, setHidesOnDeactivate: false];
+    });
+}
+
 /// Показать окно, не активируя приложение (аналог showInactive в Electron):
 /// orderFrontRegardless выводит окно на экран, не делая его key.
 pub fn show_inactive(win: &WebviewWindow) {

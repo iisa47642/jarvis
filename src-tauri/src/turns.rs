@@ -397,7 +397,7 @@ mod tests {
     use serde_json::json;
 
     fn it(role: &'static str, kind: &'static str, text: &str, ts: i64) -> ChatItem {
-        ChatItem { role, kind, text: text.into(), ts }
+        ChatItem { role, kind, text: text.into(), ts, diff: None, stat: None }
     }
 
     #[test]

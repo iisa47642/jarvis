@@ -335,8 +335,22 @@ function render() {
 
 /* --- мини-маркдаун для реплик ассистента: абзацы, списки, код. Без innerHTML. --- */
 
+// ссылка в webview: браузера нет — клик копирует URL в буфер (+тост)
+function mdLink(label, url) {
+  const a = document.createElement('span');
+  a.className = 'md-link';
+  a.textContent = label;
+  a.title = url;
+  a.addEventListener('click', (e) => {
+    e.stopPropagation();
+    navigator.clipboard?.writeText(url);
+    showToast('Ссылка скопирована');
+  });
+  return a;
+}
+
 function renderInline(el, text) {
-  for (const t of text.split(/(`[^`]+`|\*\*[^*]+\*\*)/g)) {
+  for (const t of text.split(/(`[^`]+`|\*\*[^*]+\*\*|\[[^\]]+\]\([^)\s]+\)|https?:\/\/[^\s)<>"']+)/g)) {
     if (!t) continue;
     if (t.length > 2 && t.startsWith('`') && t.endsWith('`')) {
       const code = document.createElement('code');
@@ -346,6 +360,12 @@ function renderInline(el, text) {
       const b = document.createElement('strong');
       b.textContent = t.slice(2, -2);
       el.appendChild(b);
+    } else if (t.startsWith('[')) {
+      const m = t.match(/^\[([^\]]+)\]\(([^)\s]+)\)$/);
+      if (m) el.appendChild(mdLink(m[1], m[2]));
+      else el.appendChild(document.createTextNode(t));
+    } else if (/^https?:\/\//.test(t)) {
+      el.appendChild(mdLink(t, t));
     } else {
       el.appendChild(document.createTextNode(t));
     }
@@ -366,6 +386,8 @@ function renderMarkdown(root, text) {
   const code = [];
   let inCode = false;
   let ul = null;
+  let ol = null; // нумерованный список (1. / 1))
+  let tableRows = null; // строки |‑таблицы: [{cells, header}]
   let callout = null; // .callout (свёрнутый Insight), пока открыт для записи
   let calloutBody = null; // .callout-body — туда пишется содержимое
   let calloutLabel = null; // span с текстом «Insight», в конце дополняем счётчиком
@@ -393,27 +415,72 @@ function renderMarkdown(root, text) {
   };
   const flushCode = () => {
     const pre = document.createElement('pre');
-    pre.textContent = code.join('\n');
+    // многострочный код — с номерами строк (CSS-counter), однострочный — как был
+    if (code.length > 1) {
+      pre.classList.add('numbered');
+      for (const l of code) {
+        const cl = document.createElement('div');
+        cl.className = 'cl';
+        cl.textContent = l || ' ';
+        pre.appendChild(cl);
+      }
+    } else {
+      pre.textContent = code.join('\n');
+    }
     target().appendChild(pre);
     code.length = 0;
   };
+  // |‑таблица → настоящий <table> (раньше строки сыпались сырыми параграфами)
+  const flushTable = () => {
+    if (!tableRows || !tableRows.length) { tableRows = null; return; }
+    const tbl = document.createElement('table');
+    tableRows.forEach((row) => {
+      const tr = document.createElement('tr');
+      row.cells.forEach((cell) => {
+        const td = document.createElement(row.header ? 'th' : 'td');
+        renderInline(td, cell);
+        tr.appendChild(td);
+      });
+      tbl.appendChild(tr);
+    });
+    target().appendChild(tbl);
+    tableRows = null;
+  };
+  const endBlocks = () => { ul = null; ol = null; flushTable(); };
 
   for (const raw of String(text).split('\n')) {
     const line = raw.trimEnd();
     // фенс — только строка, начинающаяся с ``` (упоминание ``` в тексте — не фенс)
     if (/^\s*```/.test(line)) {
       if (inCode) flushCode();
-      else { flushPara(); ul = null; }
+      else { flushPara(); endBlocks(); }
       inCode = !inCode;
       continue;
     }
     if (inCode) { code.push(raw); continue; }
 
+    // строка |‑таблицы: | a | b | — копим блок; разделитель |---|---| задаёт шапку
+    const tm = line.match(/^\s*\|(.+)\|\s*$/);
+    if (tm) {
+      flushPara();
+      ul = null; ol = null;
+      const cells = tm[1].split('|').map((c) => c.trim());
+      if (cells.every((c) => /^:?-{2,}:?$/.test(c) || c === '')) {
+        // разделитель шапки: предыдущая строка — header
+        if (tableRows && tableRows.length) tableRows[tableRows.length - 1].header = true;
+        continue;
+      }
+      if (!tableRows) tableRows = [];
+      tableRows.push({ cells, header: false });
+      continue;
+    }
+    if (tableRows) flushTable(); // не |‑строка — таблица закончилась
+
     // `★ Insight ───` → свёрнутая Insight-строка (раскрывается кликом)
     const co = line.match(/^\s*`?\s*[★✦☆]\s*([^─━`]*?)\s*[─━]{3,}\s*`?\s*$/);
     if (co) {
       flushPara();
-      ul = null;
+      endBlocks();
       closeCallout(); // вложенных Insight не бывает — закрываем предыдущий
       callout = document.createElement('div');
       callout.className = 'callout';
@@ -438,26 +505,39 @@ function renderMarkdown(root, text) {
     // линия из ─ : закрытие Insight либо просто разделитель
     if (/^\s*`?\s*[─━]{3,}\s*`?\s*$/.test(line)) {
       flushPara();
-      ul = null;
+      endBlocks();
       if (callout) closeCallout();
       else root.appendChild(Object.assign(document.createElement('div'), { className: 'md-hr' }));
       continue;
     }
 
-    if (!line.trim()) { flushPara(); ul = null; continue; }
+    if (!line.trim()) { flushPara(); endBlocks(); continue; }
     const m = line.match(/^\s*[-*•]\s+(.*)$/);
     if (m) {
       flushPara();
+      ol = null;
       if (!ul) { ul = document.createElement('ul'); target().appendChild(ul); }
       const li = document.createElement('li');
       renderInline(li, m[1]);
       ul.appendChild(li);
       continue;
     }
-    ul = null;
+    // нумерованный список: «1. пункт» / «2) пункт» → настоящий <ol>
+    const om = line.match(/^\s*\d{1,3}[.)]\s+(.*)$/);
+    if (om) {
+      flushPara();
+      ul = null;
+      if (!ol) { ol = document.createElement('ol'); target().appendChild(ol); }
+      const li = document.createElement('li');
+      renderInline(li, om[1]);
+      ol.appendChild(li);
+      continue;
+    }
+    ul = null; ol = null;
     para.push(line);
   }
   flushPara();
+  flushTable(); // таблица в самом конце сообщения
   if (inCode && code.length) flushCode(); // незакрытый фенс — дорендерим как код
   closeCallout(); // Insight без замыкающей линии ─ — финализируем счётчиком
 }
@@ -789,13 +869,78 @@ function appendPendingReply(text, queued) {
   pendingReplies.push({ text: text.trim(), el: msg });
 }
 
+// правка файла — карточка в стиле Claude CLI: «⏺ изменил build.rs  +20 −1»
+// с ±диффом (зелёное/красное); длинный дифф свёрнут до 12 строк
+function addToolDiff(it) {
+  toolsGroup = null; // дифф-карточка прерывает группу чипов
+  const { tool, arg } = toolParts(it.text);
+  const [verb] = TOOL_VERB[tool.toLowerCase()] || [tool, null];
+
+  const box = document.createElement('div');
+  box.className = 'msg tooldiff';
+  const card = document.createElement('div');
+  card.className = 'tdcard';
+  box.appendChild(card);
+
+  const head = document.createElement('div');
+  head.className = 'tdhead';
+  const dot = document.createElement('span'); dot.className = 'tdot'; dot.textContent = '⏺';
+  const v = document.createElement('span'); v.className = 'tdverb'; v.textContent = verb;
+  head.append(dot, v);
+  if (arg) {
+    const a = document.createElement('span'); a.className = 'tdarg'; a.textContent = arg;
+    a.title = arg;
+    head.appendChild(a);
+  }
+  if (it.stat) {
+    // «+20 −1» → зелёный/красный сегменты, как в GitHub
+    const st = document.createElement('span');
+    st.className = 'tdstat';
+    for (const part of it.stat.split(' ')) {
+      const seg = document.createElement('span');
+      seg.className = part.startsWith('+') ? 'sadd' : 'sdel';
+      seg.textContent = part;
+      st.appendChild(seg);
+    }
+    head.appendChild(st);
+  }
+  card.appendChild(head);
+
+  const body = document.createElement('div');
+  body.className = 'tdbody';
+  let n = 0;
+  for (const l of String(it.diff || '').split('\n')) {
+    if (!l) continue;
+    const dl = document.createElement('div');
+    dl.className = 'dl ' + (l[0] === '+' ? 'add' : l[0] === '-' ? 'del' : 'ctx');
+    dl.textContent = l;
+    body.appendChild(dl);
+    n++;
+  }
+  card.appendChild(body);
+  if (n > 14) {
+    body.classList.add('clip');
+    const more = document.createElement('div');
+    more.className = 'tdmore';
+    const restLabel = `… ещё ${n - 12} строк`;
+    more.textContent = restLabel;
+    more.addEventListener('click', () => {
+      const clipped = body.classList.toggle('clip');
+      more.textContent = clipped ? restLabel : 'Свернуть';
+    });
+    card.appendChild(more);
+  }
+  turnTarget().appendChild(box);
+}
+
 function appendChatItems(items) {
   const nearBottom =
     chatlogEl.scrollHeight - chatlogEl.scrollTop - chatlogEl.clientHeight < 60;
   chatlogEl.querySelector('.chatempty')?.remove();
   for (const it of items) {
     if (it.kind === 'tool') {
-      addToolChip(it.text);
+      if (it.diff) addToolDiff(it);
+      else addToolChip(it.text);
       continue;
     }
     toolsGroup = null;
@@ -813,6 +958,47 @@ function appendChatItems(items) {
     }
   }
   if (items.length && nearBottom) chatlogEl.scrollTop = chatlogEl.scrollHeight;
+}
+
+/* --- живая строка (как ✳ Thinking… в Claude CLI): спиннер + действие + таймер --- */
+const liveStart = new Map(); // sid → ts начала текущей работы
+let liveTimer = null;
+
+function updateLiveRow() {
+  if (view !== 'chat' || !chatSessionId) return;
+  const s = state.find((x) => x.id === chatSessionId);
+  const working = !!s && s.status === 'working';
+  let row = chatlogEl.querySelector('.live');
+
+  if (!working) {
+    liveStart.delete(chatSessionId);
+    if (row) row.remove();
+    if (liveTimer) { clearInterval(liveTimer); liveTimer = null; }
+    return;
+  }
+  if (!liveStart.has(chatSessionId)) liveStart.set(chatSessionId, Date.now());
+
+  const nearBottom =
+    chatlogEl.scrollHeight - chatlogEl.scrollTop - chatlogEl.clientHeight < 60;
+  if (!row) {
+    row = document.createElement('div');
+    row.className = 'live';
+    const spin = document.createElement('span');
+    spin.className = 'spin';
+    spin.textContent = '✳';
+    const txt = document.createElement('span');
+    txt.className = 'ltext';
+    const t = document.createElement('span');
+    t.className = 'ltime';
+    row.append(spin, txt, t);
+  }
+  chatlogEl.appendChild(row); // всегда последним в ленте
+  const detail = (s.detail || '').replace(/^▸\s*/, '');
+  row.querySelector('.ltext').textContent = detail || 'Работает…';
+  const secs = Math.max(0, Math.round((Date.now() - liveStart.get(chatSessionId)) / 1000));
+  row.querySelector('.ltime').textContent = secs >= 60 ? `${Math.floor(secs / 60)}м ${secs % 60}с` : `${secs}с`;
+  if (nearBottom) chatlogEl.scrollTop = chatlogEl.scrollHeight;
+  if (!liveTimer) liveTimer = setInterval(updateLiveRow, 1000);
 }
 
 function updateChatChannelMark() {
@@ -899,17 +1085,9 @@ function updateChatStatus(s) {
   chatStatusEl.textContent = '';
   if (!s || s.status === 'idle' || s.status === 'done') { chatStatusEl.hidden = true; return; }
   if (s.status === 'working') {
-    chatStatusEl.className = 'chatstatus working';
-    const d = s.detail || '';
-    if (d.startsWith('▸')) {
-      chatStatusEl.appendChild(document.createTextNode(`выполняет: ${d.slice(1).trim()}`));
-    } else {
-      chatStatusEl.appendChild(document.createTextNode('думает и генерирует ответ'));
-      const dots = document.createElement('span');
-      dots.className = 'dots';
-      chatStatusEl.appendChild(dots);
-    }
-    chatStatusEl.hidden = false;
+    // работу показывает живая строка в ленте (✳ + действие + таймер) —
+    // старый «думает и генерирует» с кружком дублировал её
+    chatStatusEl.hidden = true;
   } else if (s.status === 'waiting') {
     chatStatusEl.className = 'chatstatus waiting';
     chatStatusEl.appendChild(document.createTextNode('ждёт твоего ответа'));
@@ -1094,6 +1272,9 @@ async function openChat(sessionId, project) {
   if (!res.ok) { showToast(res.error || 'Не удалось открыть чат'); return; }
   chatSessionId = sessionId;
   chatTitleEl.textContent = res.project || project || '';
+  // фирменный акцент по агенту: Claude — терракот, Codex — голубой
+  const ag = ((state.find((x) => x.id === sessionId) || {}).agent || 'claude').toLowerCase();
+  chatlogEl.classList.toggle('agent-codex', ag === 'codex');
   boardExpanded = 0;
   closeBoard(); // доска прошлого чата не должна оставаться открытой
   closeVarPanel(); // и слайд-овер вариантов прошлого чата
@@ -1138,6 +1319,7 @@ async function openChat(sessionId, project) {
       : 'Пока пусто — новые реплики появятся здесь по мере работы агента.';
     chatlogEl.appendChild(empty);
   }
+  updateLiveRow(); // агент уже работает — показать живую строку сразу
 }
 
 window.jarvis.onChatAppend(({ sessionId, items }) => {
@@ -1785,7 +1967,7 @@ async function focusTerminal(sessionId, project) {
 window.jarvis.onState((list) => {
   state = list;
   render();
-  if (view === 'chat') updateChatChannelMark();
+  if (view === 'chat') { updateChatChannelMark(); updateLiveRow(); }
   if (view === 'question') {
     const s = state.find((x) => x.id === qSessionId);
     if (!s || !s.question) { setView('list'); render(); } // ответили в терминале — выходим
@@ -2926,6 +3108,16 @@ tabSettingsEl.addEventListener('click', () => {
 document.getElementById('tabFullscreen')?.addEventListener('click', () => {
   window.jarvis.toggleFullscreen?.();
 });
+
+// оконный режим ↔ оверлей; подсветка кнопки = текущий режим
+const tabWindowedEl = document.getElementById('tabWindowed');
+tabWindowedEl?.addEventListener('click', async () => {
+  const res = await window.jarvis.toggleWindowed?.();
+  tabWindowedEl.classList.toggle('active', !!(res && res.windowed));
+});
+window.jarvis.getSettings().then((s) => {
+  tabWindowedEl?.classList.toggle('active', !!(s && s.panelWindowed));
+}).catch(() => {});
 
 // кнопка «Открыть настройки» из окна онбординга
 window.jarvis.onGotoSettings(() => setView('settings'));

@@ -947,6 +947,14 @@ impl Daemon {
                     if s.question.is_none() && !redundant_idle {
                         let msg = ru::ru_notification(&raw);
                         let msg = if msg.is_empty() { "Claude ждёт ввода".to_string() } else { msg };
+                        // пермишен без команды бесполезен — не видно, на ЧТО даёшь
+                        // добро. Команда уже есть в last_cmd (pre-tool перед запросом).
+                        let msg = match &s.last_cmd {
+                            Some(cmd) if msg.starts_with("Нужен пермишен") => {
+                                format!("{msg} · $ {cmd}")
+                            }
+                            _ => msg,
+                        };
                         // Claude Code повторяет idle-уведомления — не спамим одним и тем же
                         let is_new = !(s.status == Status::Waiting && s.detail == msg);
                         s.status = Status::Waiting;
@@ -989,6 +997,13 @@ impl Daemon {
                         "Codex ждёт подтверждения".to_string()
                     } else {
                         format!("Codex: подтвердить {tool}")
+                    };
+                    // команда из tool_input (если есть) — видно, ЧТО подтверждаешь
+                    let msg = match p.get("tool_input").and_then(|v| v.get("command")).and_then(Value::as_str) {
+                        Some(cmd) if !cmd.is_empty() => {
+                            format!("{msg} · $ {}", ellipsize(&one_line(cmd), 120))
+                        }
+                        _ => msg,
                     };
                     let is_new = !(s.status == Status::Waiting && s.detail == msg);
                     s.status = Status::Waiting;
@@ -1822,7 +1837,9 @@ fn track_activity(s: &mut Session, name: &str, input: Option<&Value>) {
     if let Some(Value::Object(input)) = input {
         if let Some(cmd) = input.get("command").and_then(Value::as_str) {
             is_command = true;
-            s.last_cmd = Some(ellipsize(&one_line(cmd), 48));
+            // 120, не 48: команда попадает в пермишен-тост — по обрубку в 48
+            // символов не понять, на что даёшь разрешение
+            s.last_cmd = Some(ellipsize(&one_line(cmd), 120));
         } else if let Some(fp) = input.get("file_path").and_then(Value::as_str) {
             let rel = match &s.cwd {
                 Some(cwd) if fp.starts_with(cwd.as_str()) => {
@@ -2207,6 +2224,9 @@ fn reconcile_panes(
         if pi.pid <= 0 || !is_codex_pane(&pi.command) {
             continue;
         }
+        if !pi.attached {
+            continue; // detached-зомби (терминал закрыт) — не показываем
+        }
         if owned_pids.contains(&pi.pid) || owned_panes.contains(&pi.pane_id) {
             continue;
         }
@@ -2244,6 +2264,7 @@ mod tests {
             cwd: "/Users/x/proj".into(),
             pid,
             command: command.to_string(),
+            attached: true,
         }
     }
 
@@ -2332,6 +2353,19 @@ mod tests {
         assert!(m.contains_key("019f-real"), "реальная сессия осталась");
         // и ей починили пану по pid
         assert_eq!(m["019f-real"].tmux_pane.as_deref(), Some("%4"));
+    }
+
+    #[test]
+    fn reconcile_panes_skips_detached_codex_pane() {
+        // detached-пана = зомби (терминал закрыли, tmux-сессия живёт в фоне):
+        // провизорную не заводим — иначе после каждого рестарта демона список
+        // пухнет от старых codex.
+        let mut m = HashMap::new();
+        let mut p = pane("%4", 7061, "codex-aarch64-a");
+        p.attached = false;
+        let changed = reconcile_panes(&mut m, &[p], &HashSet::new(), 100);
+        assert!(!changed, "detached codex не показываем");
+        assert!(m.is_empty());
     }
 
     #[test]

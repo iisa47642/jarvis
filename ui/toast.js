@@ -82,16 +82,30 @@ window.toast.onHover((h) => {
 
 window.toast.onAdd((d) => {
   // дедуп: карточка с таким id уже на экране (стабильный id «done-<sid>» и т.п.)
-  // — обновляем её на месте, а не плодим вторую «одна за другой»
+  // — обновляем её на месте, а не плодим вторую «одна за другой».
+  // Если у обновления появился вопрос (был «Нужен пермишен», стал пикер 1/2/3) —
+  // текстовый апдейт не годится: пересоздаём карточку целиком.
   const existing = cards.get(d.id);
   if (existing) {
-    const t = existing.el.querySelector('.title');
-    if (t) t.textContent = d.title || '';
-    const b = existing.el.querySelector('.body');
-    if (b) b.textContent = d.body || '';
-    armTimer(d.id); // таймер заново — карточка «обновилась»
-    reportHeight();
-    return;
+    if (d.question) {
+      removeCard(d.id, true); // и проваливаемся в создание ниже
+    } else {
+      const t = existing.el.querySelector('.title');
+      if (t) t.textContent = d.title || '';
+      const b = existing.el.querySelector('.body');
+      if (b) b.textContent = d.body || '';
+      armTimer(d.id); // таймер заново — карточка «обновилась»
+      reportHeight();
+      return;
+    }
+  }
+
+  // один запрос — одна карточка: пришёл вопрос по сессии → прочие карточки той
+  // же сессии устарели («Нужен пермишен» + пикер 1/2/3 были дублем)
+  if (d.question && d.sessionId) {
+    for (const [id, c] of cards) {
+      if (c.sessionId === d.sessionId) removeCard(id, true);
+    }
   }
 
   if (cards.size >= MAX_CARDS) {
@@ -100,8 +114,10 @@ window.toast.onAdd((d) => {
 
   // карточка смены режима: компактная, по центру, с «поп»-анимацией, живёт недолго
   const isMode = d.kind === 'mode';
-  const ttl = isMode ? 1900 : TTL;
-  let sticky = false; // вопрос — «липкая» карточка (не исчезает по таймеру)
+  // срок жизни — из настроек (ttlMs в payload демона); 0 = «Не прятать» (липко)
+  const ttlPref = typeof d.ttlMs === 'number' ? d.ttlMs : TTL;
+  const ttl = isMode ? 1900 : (ttlPref > 0 ? ttlPref : TTL);
+  let sticky = !isMode && ttlPref === 0; // «Не прятать» — все карточки липкие
 
   const card = document.createElement('div');
   card.className = `card${isMode ? ' mode' : ''}`;
@@ -246,8 +262,9 @@ window.toast.onAdd((d) => {
     });
   }
 
+  if (sticky) card.classList.add('sticky');
   stackEl.appendChild(card); // новые — снизу, старые поднимаются
-  cards.set(d.id, { el: card, timer: null, ttl, sticky });
+  cards.set(d.id, { el: card, timer: null, ttl, sticky, sessionId: d.sessionId || null });
   armTimer(d.id);
 
   reportHeight();

@@ -127,6 +127,10 @@ pub struct PaneInfo {
     /// узнаём codex-паны (шим оборачивает codex в tmux до того, как codex
     /// пришлёт первый хук), чтобы завести провизорную сессию заранее.
     pub command: String,
+    /// К сессии паны подключён клиент (`session_attached`). detached-паны —
+    /// фоновые зомби (терминал закрыли, tmux-сессия живёт): провизорные для
+    /// них не заводим, иначе после тестов/перезапусков список пухнет.
+    pub attached: bool,
 }
 
 /// Живые паны сервера jarvis с метаданными (id, имя сессии, cwd, pid процесса
@@ -142,7 +146,7 @@ pub async fn list_panes_meta() -> Result<Option<Vec<PaneInfo>>, ()> {
         "list-panes",
         "-a",
         "-F",
-        "#{pane_id}\t#{session_name}\t#{pane_pid}\t#{pane_current_command}\t#{pane_current_path}",
+        "#{pane_id}\t#{session_name}\t#{pane_pid}\t#{pane_current_command}\t#{session_attached}\t#{pane_current_path}",
     ])
     .stdin(Stdio::null())
     .stdout(Stdio::piped())
@@ -153,7 +157,7 @@ pub async fn list_panes_meta() -> Result<Option<Vec<PaneInfo>>, ()> {
             String::from_utf8_lossy(&out.stdout)
                 .lines()
                 .filter_map(|line| {
-                    let mut it = line.splitn(5, '\t');
+                    let mut it = line.splitn(6, '\t');
                     let pane_id = it.next()?.trim();
                     if pane_id.is_empty() {
                         return None;
@@ -161,6 +165,8 @@ pub async fn list_panes_meta() -> Result<Option<Vec<PaneInfo>>, ()> {
                     let session_name = it.next().unwrap_or("").trim().to_string();
                     let pid = it.next().unwrap_or("").trim().parse::<i64>().unwrap_or(0);
                     let command = it.next().unwrap_or("").trim().to_string();
+                    // session_attached — счётчик клиентов ("0"/"1"/"2"), не флаг
+                    let attached = it.next().unwrap_or("").trim().parse::<i64>().unwrap_or(0) > 0;
                     let cwd = it.next().unwrap_or("").trim().to_string();
                     Some(PaneInfo {
                         pane_id: pane_id.to_string(),
@@ -168,6 +174,7 @@ pub async fn list_panes_meta() -> Result<Option<Vec<PaneInfo>>, ()> {
                         cwd,
                         pid,
                         command,
+                        attached,
                     })
                 })
                 .collect(),

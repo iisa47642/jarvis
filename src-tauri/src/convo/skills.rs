@@ -366,7 +366,7 @@ mod tests {
     }
 
     fn item(role: &'static str, kind: &'static str, text: &str) -> crate::transcript::ChatItem {
-        crate::transcript::ChatItem { role, kind, text: text.into(), ts: 0 }
+        crate::transcript::ChatItem { role, kind, text: text.into(), ts: 0, diff: None, stat: None }
     }
 
     #[test]

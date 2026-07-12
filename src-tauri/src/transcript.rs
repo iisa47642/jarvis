@@ -20,6 +20,67 @@ pub struct ChatItem {
     pub kind: &'static str, // 'text' | 'tool'
     pub text: String,
     pub ts: i64,
+    /// CLI-стиль дифф правки (Edit/Write): строки с префиксами `-`/`+` —
+    /// панель рисует их красным/зелёным, как «⏺ Update(…)» в Claude Code.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diff: Option<String>,
+    /// Сводка диффа для заголовка карточки: «+20 −1».
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stat: Option<String>,
+}
+
+/// Дифф правки из tool_use-input: Edit (old→new), Write (весь контент «+»),
+/// MultiEdit (edits[] подряд). None — тул не про правку файла.
+pub fn tool_diff(name: &str, input: Option<&Value>) -> Option<(String, String)> {
+    const MAX_LINES: usize = 160; // дальше карточка бессмысленно длинная
+    let input = input?.as_object()?;
+    let mut out = String::new();
+    let (mut added, mut removed, mut lines) = (0usize, 0usize, 0usize);
+    let mut emit = |old: &str, new: &str| {
+        for l in old.lines() {
+            removed += 1;
+            lines += 1;
+            if lines <= MAX_LINES {
+                out.push('-');
+                out.push_str(&ellipsize(l, 300));
+                out.push('\n');
+            }
+        }
+        for l in new.lines() {
+            added += 1;
+            lines += 1;
+            if lines <= MAX_LINES {
+                out.push('+');
+                out.push_str(&ellipsize(l, 300));
+                out.push('\n');
+            }
+        }
+    };
+    fn s(v: Option<&Value>) -> &str {
+        v.and_then(Value::as_str).unwrap_or("")
+    }
+    match name.to_ascii_lowercase().as_str() {
+        "edit" | "notebookedit" => emit(s(input.get("old_string")), s(input.get("new_string"))),
+        "multiedit" => {
+            for e in input.get("edits").and_then(Value::as_array).map(Vec::as_slice).unwrap_or(&[]) {
+                emit(s(e.get("old_string")), s(e.get("new_string")));
+            }
+        }
+        "write" => emit("", s(input.get("content"))),
+        _ => return None,
+    }
+    if added == 0 && removed == 0 {
+        return None;
+    }
+    if lines > MAX_LINES {
+        out.push_str(&format!("… ещё {} строк\n", lines - MAX_LINES));
+    }
+    let stat = if removed == 0 {
+        format!("+{added}")
+    } else {
+        format!("+{added} −{removed}")
+    };
+    Some((out, stat))
 }
 
 /// Хвост файла → массив распарсенных JSONL-строк.
@@ -144,7 +205,7 @@ pub fn to_chat_items(entry: &Value) -> Vec<ChatItem> {
         let t = text.trim();
         // служебные вставки (<system-reminder>, <command-name>…) в чат не показываем
         if !t.is_empty() && !t.starts_with('<') {
-            items.push(ChatItem { role, kind: "text", text: ellipsize(t, 4000), ts });
+            items.push(ChatItem { role, kind: "text", text: ellipsize(t, 4000), ts, diff: None, stat: None });
         }
     };
 
@@ -167,15 +228,21 @@ pub fn to_chat_items(entry: &Value) -> Vec<ChatItem> {
                         Some("text") => {
                             push_text("assistant", b.get("text").and_then(Value::as_str).unwrap_or(""), &mut items)
                         }
-                        Some("tool_use") => items.push(ChatItem {
-                            role: "assistant",
-                            kind: "tool",
-                            text: short_tool_label(
-                                b.get("name").and_then(Value::as_str).unwrap_or(""),
-                                b.get("input"),
-                            ),
-                            ts,
-                        }),
+                        Some("tool_use") => {
+                            let name = b.get("name").and_then(Value::as_str).unwrap_or("");
+                            let (diff, stat) = match tool_diff(name, b.get("input")) {
+                                Some((d, s)) => (Some(d), Some(s)),
+                                None => (None, None),
+                            };
+                            items.push(ChatItem {
+                                role: "assistant",
+                                kind: "tool",
+                                text: short_tool_label(name, b.get("input")),
+                                ts,
+                                diff,
+                                stat,
+                            })
+                        }
                         _ => {}
                     }
                 }
@@ -300,6 +367,23 @@ pub fn read_model_from_project(cwd: &str) -> Option<String> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn tool_diff_edit_write_and_other() {
+        // Edit: old → «-», new → «+», stat считает строки
+        let input = json!({"old_string": "a\nb", "new_string": "c"});
+        let (d, s) = tool_diff("Edit", Some(&input)).unwrap();
+        assert_eq!(d, "-a\n-b\n+c\n");
+        assert_eq!(s, "+1 −2");
+        // Write: весь контент — «+», без «−» в stat
+        let input = json!({"content": "x\ny", "file_path": "f.rs"});
+        let (d, s) = tool_diff("Write", Some(&input)).unwrap();
+        assert_eq!(d, "+x\n+y\n");
+        assert_eq!(s, "+2");
+        // не-правка → None
+        assert!(tool_diff("Bash", Some(&json!({"command": "ls"}))).is_none());
+        assert!(tool_diff("Edit", Some(&json!({"old_string": "", "new_string": ""}))).is_none());
+    }
 
     #[test]
     fn tool_label_strips_mcp_prefix_and_takes_detail() {

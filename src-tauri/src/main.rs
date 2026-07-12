@@ -118,6 +118,7 @@ fn main() {
             ipc::state_clear,
             ipc::panel_hide,
             ipc::panel_toggle_fullscreen,
+            ipc::panel_toggle_windowed,
             ipc::settings_get,
             ipc::settings_set,
             ipc::chat_open,

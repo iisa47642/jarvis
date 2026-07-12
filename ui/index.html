@@ -10,7 +10,8 @@
     /* тонировка поверх нативного вибранси-блюра (vibrancy в main.js).
        плотная (0.85) — как в каноничном дизайн-макете Jarvis: панель тёмная,
        вибранси едва просвечивает, текст читается без подсветки. */
-    --bg: rgba(10, 10, 12, 0.85);
+    /* светлее исходной (10,10,12,.85): вибранси просвечивает, панель дышит */
+    --bg: rgba(30, 30, 36, 0.78);
     --border: rgba(255, 255, 255, 0.08);
     --hairline: rgba(255, 255, 255, 0.06);
     --row-hover: rgba(255, 255, 255, 0.07);
@@ -50,7 +51,9 @@
     height: 100%;
     display: flex;
     flex-direction: column;
-    background: var(--bg);
+    /* не плоская заливка, а вертикальный градиент: сверху чуть светлее и
+       теплее — панель объёмная, а не «чёрная яма» */
+    background: linear-gradient(180deg, rgba(38, 37, 44, 0.78), var(--bg) 42%, rgba(22, 22, 27, 0.82));
     /* поверх нативного вибранси добавляем CSS-блюр — стекло гуще */
     backdrop-filter: blur(12px) saturate(150%);
     -webkit-backdrop-filter: blur(12px) saturate(150%);
@@ -218,7 +221,7 @@
 
   .badge.host { color: var(--faint); border-color: rgba(255, 255, 255, 0.06); }
   /* бейдж агента (codex и т.п.) — акцентный тинт, чтобы отличать бэкенды в списке */
-  .badge.agent { color: #7fd6c2; border-color: rgba(127, 214, 194, 0.32); }
+  .badge.agent { color: #58a6ff; border-color: rgba(88, 166, 255, 0.35); } /* codex — голубой */
 
   .gitbranch {
     font-family: var(--mono);
@@ -749,28 +752,194 @@
   .bubble ul { margin: 0 0 9px; padding-left: 16px; }
   .bubble ul:last-child { margin-bottom: 0; }
   .bubble li { margin: 3px 0; }
+  .bubble ol { margin: 0 0 9px; padding-left: 20px; }
+  .bubble ol:last-child { margin-bottom: 0; }
+  /* |‑таблицы маркдауна: тонкие полупрозрачные линии, шапка чуть ярче */
+  .bubble table {
+    border-collapse: collapse;
+    margin: 4px 0 10px;
+    font-size: 12.5px;
+    line-height: 1.45;
+    max-width: 100%;
+  }
+  .bubble th, .bubble td {
+    border: 1px solid rgba(255, 255, 255, 0.11);
+    padding: 5px 9px;
+    text-align: left;
+    vertical-align: top;
+  }
+  .bubble th { background: rgba(255, 255, 255, 0.055); font-weight: 600; color: var(--text); }
+  /* ссылка: браузера в панели нет — клик копирует URL (тост подтвердит) */
+  .md-link { text-decoration: underline; text-underline-offset: 2px; cursor: pointer; }
+  .md-link:hover { color: var(--text); }
+
+  /* фирменный акцент агента: Claude — терракот Anthropic, Codex — голубой.
+     --agent-soft/faint — готовые полупрозрачные тона (WKWebView без color-mix) */
+  .chatlog {
+    --agent-accent: #d97757;
+    --agent-soft: rgba(217, 119, 87, 0.45);
+    --agent-faint: rgba(217, 119, 87, 0.07);
+    min-width: 0;
+  }
+  .chatlog.agent-codex {
+    --agent-accent: #58a6ff;
+    --agent-soft: rgba(88, 166, 255, 0.45);
+    --agent-faint: rgba(88, 166, 255, 0.07);
+  }
+  .chatlog .mwho { color: var(--agent-accent); }
+
+  /* лента дышит: новые сообщения мягко всплывают */
+  .msg { animation: msg-in 0.18s ease; }
+  @keyframes msg-in {
+    from { opacity: 0; transform: translateY(4px); }
+    to { opacity: 1; transform: none; }
+  }
+
+  /* реплика агента — тёплая карточка с акцентной нитью слева (не голый текст
+     на чёрном): чат читается как диалог, а не как лог */
+  .msg.assistant .bubble {
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.045), rgba(255, 255, 255, 0.028));
+    border: 1px solid rgba(255, 255, 255, 0.055);
+    border-left: 2px solid var(--agent-soft);
+    border-radius: 4px 12px 12px 12px;
+    padding: 10px 14px;
+    max-width: 100%;
+    overflow-wrap: anywhere;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  }
+
+  /* длинные строки не убегают за экран: ширина от окна, перенос где угодно */
+  .msg.assistant { max-width: min(560px, 100%); }
+  .msg.user .bubble { max-width: min(440px, 100%); overflow-wrap: anywhere; }
+  .bubble table { display: block; overflow-x: auto; }
+  .bubble td, .bubble th { overflow-wrap: anywhere; }
+
+  /* карточка правки файла — GitHub-dark: хедер с файлом, ±строки с подложками */
+  .tooldiff { max-width: min(560px, 100%); }
+  .tdcard {
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 10px;
+    overflow: hidden;
+    background: rgba(255, 255, 255, 0.025);
+    box-shadow: 0 1px 8px rgba(0, 0, 0, 0.18), inset 0 1px 0 rgba(255, 255, 255, 0.045);
+  }
+  .tdhead {
+    display: flex;
+    align-items: baseline;
+    gap: 7px;
+    font-size: 12px;
+    padding: 7px 11px;
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0.028));
+    border-bottom: 1px solid var(--hairline);
+  }
+  .tdot { color: var(--agent-accent, #d97757); font-size: 9px; }
+  .tdverb { color: var(--muted); }
+  .tdarg {
+    font-family: var(--mono);
+    font-size: 11.5px;
+    color: var(--text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+  }
+  .tdstat { font-family: var(--mono); font-size: 11px; margin-left: auto; flex: none; }
+  .tdstat .sadd { color: #7ee787; }
+  .tdstat .sdel { color: #ff9b95; margin-left: 6px; }
+  .tdbody {
+    font-family: var(--mono);
+    font-size: 11.5px;
+    line-height: 1.55;
+    padding: 5px 0;
+    max-height: 320px;
+    overflow-y: auto;
+  }
+  .tdbody .dl {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    padding: 0 11px;
+  }
+  .tdbody .dl.add { background: rgba(46, 160, 67, 0.14); color: #b8f0c0; }
+  .tdbody .dl.del { background: rgba(248, 81, 73, 0.12); color: #ffc4c0; }
+  .tdbody .dl.ctx { color: var(--muted); }
+  .tdbody.clip .dl:nth-child(n + 13) { display: none; }
+  .tdmore {
+    font-size: 11px;
+    color: var(--muted);
+    cursor: pointer;
+    padding: 5px 11px 6px;
+    border-top: 1px solid var(--hairline);
+  }
+  .tdmore:hover { color: var(--text); background: rgba(255, 255, 255, 0.03); }
+
+  /* живая строка (как «✳ Thinking…» в Claude CLI): спиннер + действие + таймер */
+  .live {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    padding: 2px 0 6px;
+    font-size: 12.5px;
+    color: var(--muted);
+  }
+  .live .spin {
+    color: var(--agent-accent, #d97757);
+    display: inline-block;
+    animation: live-spin 1.6s linear infinite;
+    transform-origin: 50% 52%;
+    font-size: 13px;
+  }
+  .live .ltext {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 420px;
+  }
+  .live .ltime { font-family: var(--mono); font-size: 10.5px; color: var(--faint); }
+  @keyframes live-spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+  }
   .bubble code {
     font-family: var(--mono);
     font-size: 12px;
-    background: rgba(255, 255, 255, 0.07);
-    border-radius: 4px;
+    background: var(--agent-faint, rgba(255, 255, 255, 0.08));
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    border-radius: 5px;
     padding: 1px 5px;
-    color: #c8c8ce;
+    color: #dcd6d0; /* тёплый светлый — читаемее холодного серого */
   }
   .bubble pre {
     font-family: var(--mono);
     font-size: 12px;
-    line-height: 1.5;
-    background: rgba(255, 255, 255, 0.04);
-    border: 1px solid var(--hairline);
-    border-radius: 8px;
-    padding: 8px 10px;
-    margin: 0 0 9px;
+    line-height: 1.55;
+    background: rgba(255, 255, 255, 0.055);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 10px;
+    padding: 9px 12px;
+    margin: 2px 0 10px;
     overflow: auto;
-    max-height: 200px;
+    max-height: 260px;
     white-space: pre;
+    max-width: 100%;
+    color: #d9d9de;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
   }
   .bubble pre:last-child { margin-bottom: 0; }
+  /* номера строк: CSS-counter, не выделяются при копировании */
+  .bubble pre.numbered { counter-reset: ln; padding-left: 0; padding-right: 0; }
+  .bubble pre.numbered .cl { counter-increment: ln; display: flex; padding-right: 12px; }
+  .bubble pre.numbered .cl::before {
+    content: counter(ln);
+    flex: none;
+    width: 2.4em;
+    text-align: right;
+    margin-right: 11px;
+    padding-left: 6px;
+    color: var(--faint);
+    border-right: 1px solid var(--hairline);
+    padding-right: 7px;
+    user-select: none;
+  }
 
   /* Insight — свёрнут в тихую строку «✦ Insight · N заметок», раскрывается кликом */
   .callout { margin: 2px 0; }
@@ -1307,19 +1476,23 @@
 </head>
 <body>
   <div class="panel entering" id="panel">
-    <div class="cmdrow">
+    <div class="cmdrow" data-tauri-drag-region>
       <!-- lucide: search -->
       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
       <input id="query" placeholder="Найти чат…" spellcheck="false" autocomplete="off" />
       <span class="daemon-dot" title="демон активен"></span>
     </div>
 
-    <div class="tabs">
+    <div class="tabs" data-tauri-drag-region>
       <div class="tab active" id="tabSessions">Чаты <span class="tabkey">⌘1</span></div>
       <div class="tab" id="tabHistory">Проекты <span class="tabkey">⌘2</span></div>
       <div class="tab" id="tabStats">Статистика <span class="tabkey">⌘3</span></div>
       <div class="tab" id="tabVoice">Голос <span class="tabkey">⌘4</span></div>
       <span class="spacer"></span>
+      <div class="tab icon" id="tabWindowed" title="Оконный режим: двигать/ресайзить, своё окно на своём экране">
+        <!-- lucide: app-window -->
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="M10 4v4"/><path d="M2 8h20"/><path d="M6 4v4"/></svg>
+      </div>
       <div class="tab icon" id="tabFullscreen" title="Во весь экран · ⌘⇧F">
         <!-- lucide: maximize -->
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M21 8V5a2 2 0 0 0-2-2h-3"/><path d="M3 16v3a2 2 0 0 0 2 2h3"/><path d="M16 21h3a2 2 0 0 0 2-2v-3"/></svg>
