@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Jarvis",
-  "version": "0.3.3",
+  "version": "0.4.0",
   "identifier": "app.jarvis.monitor",
   "build": {
     "frontendDist": "../ui"
@@ -17,9 +17,9 @@
   "plugins": {
     "updater": {
       "endpoints": [
-        "https://github.com/Sergey-Chernyshev/jarvis/releases/latest/download/latest.json"
+        "https://github.com/iisa47642/jarvis/releases/latest/download/latest.json"
       ],
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDZGNzk2RTREOUY5M0RDQQpSV1RLUGZuWjVKYjNCdUNjQ3NjYVZ2NjZveTVtdloxb3lzNlVhTlNnenZrN2x4NC9tTFgwb213Ugo="
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDQ3M0MzMzg5RUJDQUYzQ0IKUldUTDg4cnJpVE04UjNEVkl1eXhONVJXUkp1ajNVdEVUQ0JYeW14MC9BVDFxczVJSGNTQy9kOHAK"
     }
   },
   "bundle": {
