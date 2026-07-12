@@ -32,6 +32,7 @@ CODEX_BYPASS=''
 # Сетевые переменные, которые шим синхронизирует с текущим терминалом.
 NET_VARS="HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy NO_PROXY no_proxy"
 [ "$BIN_NAME" = claude ] && NET_VARS="$NET_VARS ANTHROPIC_BASE_URL NODE_EXTRA_CA_CERTS"
+[ "$BIN_NAME" = gemini ] && NET_VARS="$NET_VARS GEMINI_API_KEY GOOGLE_APPLICATION_CREDENTIALS GOOGLE_CLOUD_PROJECT"
 
 # Разовый off-тумблер: снять сетевые переменные для этого запуска (например, под VPN).
 # shellcheck disable=SC2086  # NET_VARS должен расщепляться на имена
@@ -59,6 +60,29 @@ case "$BIN_NAME" in
     case "${1:-}" in
       exec|e|login|logout|mcp|mcp-server|app-server|completion|doctor|apply|review|cloud|features|update|sandbox|help|-h|--help|--version) wrap=0 ;;
     esac
+    ;;
+  gemini)
+    # gemini: -p/--prompt — headless; сабкоманды (mcp/hooks/…) неинтерактивны.
+    case "${1:-}" in
+      mcp|extensions|extension|skills|skill|hooks|hook|gemma|help|-h|--help|--version|--list-sessions) wrap=0 ;;
+    esac
+    for a in "$@"; do
+      case "$a" in
+        -p|--prompt|--version|--list-sessions|--delete-session|-l|--list-extensions) wrap=0 ;;
+      esac
+    done
+    ;;
+  agy)
+    # agy (Antigravity CLI): --print/-p — headless; сабкоманды неинтерактивны.
+    # Хуков у agy нет — сессия видна как провизорная (pane_sweep), reply работает.
+    case "${1:-}" in
+      agent|agents|changelog|help|install|models|plugin|plugins|update) wrap=0 ;;
+    esac
+    for a in "$@"; do
+      case "$a" in
+        -p|--print|--prompt) wrap=0 ;;
+      esac
+    done
     ;;
   *)
     # claude: -p/--print одноразовый; auth/setup-token — логин (мимо tmux).

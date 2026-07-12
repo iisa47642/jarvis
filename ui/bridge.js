@@ -12,6 +12,7 @@
 
   window.jarvis = {
     onState: (cb) => on('state', cb),
+    onBridge: (cb) => on('bridge', cb),
     onShown: (cb) => on('panel-shown', () => cb()),
     onOpenSession: (cb) => on('open-session', cb),
     getState: () => invoke('state_get'),
@@ -30,6 +31,11 @@
     focusTerminal: (sessionId) => invoke('terminal_focus', { sessionId }),
     launchSession: (cwd, agent, sessionId) => invoke('session_launch', { cwd: cwd ?? null, agent, sessionId: sessionId ?? null }),
     sendReply: (sessionId, text) => invoke('session_reply', { sessionId, text }),
+    bridgeGet: () => invoke('bridge_get'),
+    bridgeStart: (config) => invoke('bridge_start', { config }),
+    bridgePause: () => invoke('bridge_pause'),
+    bridgeResume: () => invoke('bridge_resume'),
+    bridgeStop: () => invoke('bridge_stop'),
     // вставленная картинка → временный файл; путь уйдёт агенту в промпте
     saveImage: (dataBase64, ext) => invoke('session_save_image', { dataBase64, ext }),
     pingTerminal: (sessionId) => invoke('terminal_ping', { sessionId }),

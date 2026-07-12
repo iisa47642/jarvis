@@ -11,6 +11,7 @@ mod capability;
 mod agent;
 #[allow(dead_code)] // Codex-методы наполняются по инкрементам (codex CLI support)
 mod backend;
+mod bridge;
 mod claude_bin;
 mod commands_catalog;
 mod convo; // голосовой разговор: снапшот → Haiku-план → скилы → голосовой ответ (п/п-2)
@@ -151,6 +152,11 @@ fn main() {
             ipc::session_reply,
             ipc::session_save_image,
             ipc::session_continue,
+            ipc::bridge_get,
+            ipc::bridge_start,
+            ipc::bridge_pause,
+            ipc::bridge_resume,
+            ipc::bridge_stop,
             ipc::agent_confirm,
             ipc::voice_pick_resolve,
             ipc::voice_stage_cancel,

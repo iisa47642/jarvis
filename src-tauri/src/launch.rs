@@ -13,13 +13,37 @@ use std::process::Stdio;
 /// claude → `--dangerously-skip-permissions`, codex → `--dangerously-bypass-approvals-and-sandbox`.
 pub fn agent_command(agent: &str, session_id: Option<&str>, dangerous: bool) -> String {
     if agent == "codex" {
-        let flag = if dangerous { " --dangerously-bypass-approvals-and-sandbox" } else { "" };
+        let flag = if dangerous {
+            " --dangerously-bypass-approvals-and-sandbox"
+        } else {
+            ""
+        };
         match session_id {
             Some(id) => format!("codex resume {id}{flag}"),
             None => format!("codex{flag}"),
         }
+    } else if agent == "gemini" {
+        let flag = if dangerous { " --yolo" } else { "" };
+        match session_id {
+            Some(id) => format!("gemini --resume {id}{flag}"),
+            None => format!("gemini{flag}"),
+        }
+    } else if agent == "agy" {
+        let flag = if dangerous {
+            " --dangerously-skip-permissions"
+        } else {
+            ""
+        };
+        match session_id {
+            Some(id) => format!("agy --conversation {id}{flag}"),
+            None => format!("agy{flag}"),
+        }
     } else {
-        let flag = if dangerous { " --dangerously-skip-permissions" } else { "" };
+        let flag = if dangerous {
+            " --dangerously-skip-permissions"
+        } else {
+            ""
+        };
         match session_id {
             Some(id) => format!("claude --resume {id}{flag}"),
             None => format!("claude{flag}"),
@@ -47,7 +71,10 @@ pub fn inner_command(cwd: &str, proxy_cmd: &str, agent_cmd: &str) -> String {
 /// строк (сырой `\n` внутри "…" — синтаксическая ошибка osascript).
 /// Одинарные кавычки (из shell_quote) внутри неё безопасны.
 fn applescript_escape(s: &str) -> String {
-    s.replace('\\', r"\\").replace('"', "\\\"").replace('\n', r"\n").replace('\r', r"\r")
+    s.replace('\\', r"\\")
+        .replace('"', "\\\"")
+        .replace('\n', r"\n")
+        .replace('\r', r"\r")
 }
 
 async fn osascript(args: &[String]) -> Result<(), String> {
@@ -63,7 +90,11 @@ async fn osascript(args: &[String]) -> Result<(), String> {
         Ok(())
     } else {
         let msg = String::from_utf8_lossy(&out.stderr);
-        Err(if msg.trim().is_empty() { "терминал не открылся".into() } else { msg.trim().to_string() })
+        Err(if msg.trim().is_empty() {
+            "терминал не открылся".into()
+        } else {
+            msg.trim().to_string()
+        })
     }
 }
 
@@ -74,11 +105,16 @@ pub async fn spawn(terminal: &str, custom_cmd: &str, inner: &str) -> Result<(), 
             let esc = applescript_escape(inner);
             // Создаём окно с дефолт-профилем и пишем команду в его сессию.
             osascript(&[
-                "-e".into(), "tell application \"iTerm2\"".into(),
-                "-e".into(), "set w to (create window with default profile)".into(),
-                "-e".into(), format!("tell current session of w to write text \"{esc}\""),
-                "-e".into(), "activate".into(),
-                "-e".into(), "end tell".into(),
+                "-e".into(),
+                "tell application \"iTerm2\"".into(),
+                "-e".into(),
+                "set w to (create window with default profile)".into(),
+                "-e".into(),
+                format!("tell current session of w to write text \"{esc}\""),
+                "-e".into(),
+                "activate".into(),
+                "-e".into(),
+                "end tell".into(),
             ])
             .await
         }
@@ -114,10 +150,14 @@ pub async fn spawn(terminal: &str, custom_cmd: &str, inner: &str) -> Result<(), 
         _ => {
             let esc = applescript_escape(inner);
             osascript(&[
-                "-e".into(), "tell application \"Terminal\"".into(),
-                "-e".into(), format!("do script \"{esc}\""),
-                "-e".into(), "activate".into(),
-                "-e".into(), "end tell".into(),
+                "-e".into(),
+                "tell application \"Terminal\"".into(),
+                "-e".into(),
+                format!("do script \"{esc}\""),
+                "-e".into(),
+                "activate".into(),
+                "-e".into(),
+                "end tell".into(),
             ])
             .await
         }
@@ -131,16 +171,46 @@ mod tests {
     #[test]
     fn agent_command_variants() {
         assert_eq!(agent_command("claude", None, false), "claude");
-        assert_eq!(agent_command("claude", None, true), "claude --dangerously-skip-permissions");
-        assert_eq!(agent_command("claude", Some("abc"), true), "claude --resume abc --dangerously-skip-permissions");
+        assert_eq!(
+            agent_command("claude", None, true),
+            "claude --dangerously-skip-permissions"
+        );
+        assert_eq!(
+            agent_command("claude", Some("abc"), true),
+            "claude --resume abc --dangerously-skip-permissions"
+        );
         assert_eq!(agent_command("codex", None, false), "codex");
-        assert_eq!(agent_command("codex", None, true), "codex --dangerously-bypass-approvals-and-sandbox");
+        assert_eq!(
+            agent_command("codex", None, true),
+            "codex --dangerously-bypass-approvals-and-sandbox"
+        );
         assert_eq!(agent_command("codex", Some("x1"), false), "codex resume x1");
+        assert_eq!(
+            agent_command("gemini", Some("g1"), false),
+            "gemini --resume g1"
+        );
+        assert_eq!(
+            agent_command("agy", None, true),
+            "agy --dangerously-skip-permissions"
+        );
+        assert_eq!(
+            agent_command("agy", Some("a1"), false),
+            "agy --conversation a1"
+        );
+        assert_eq!(agent_command("gemini", None, false), "gemini");
+        assert_eq!(agent_command("gemini", None, true), "gemini --yolo");
+        assert_eq!(
+            agent_command("gemini", Some("g1"), false),
+            "gemini --resume g1"
+        );
     }
 
     #[test]
     fn inner_command_with_and_without_proxy() {
-        assert_eq!(inner_command("/tmp/p", "", "claude"), "cd '/tmp/p' && claude");
+        assert_eq!(
+            inner_command("/tmp/p", "", "claude"),
+            "cd '/tmp/p' && claude"
+        );
         assert_eq!(
             inner_command("/tmp/p", "export X=1", "claude"),
             "export X=1 && cd '/tmp/p' && claude"
@@ -149,7 +219,10 @@ mod tests {
 
     #[test]
     fn inner_command_without_cwd_skips_cd() {
-        assert_eq!(inner_command("", "", "claude --resume abc"), "claude --resume abc");
+        assert_eq!(
+            inner_command("", "", "claude --resume abc"),
+            "claude --resume abc"
+        );
         assert_eq!(
             inner_command("  ", "export X=1", "codex resume x1"),
             "export X=1 && codex resume x1"

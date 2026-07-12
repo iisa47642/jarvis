@@ -31,9 +31,19 @@ pub fn spans(items: &[ChatItem]) -> Vec<TurnSpan> {
             if let Some(last) = out.last_mut() {
                 last.end = i;
             }
-            out.push(TurnSpan { key: it.ts.to_string(), start: i, end: i, complete: true });
+            out.push(TurnSpan {
+                key: it.ts.to_string(),
+                start: i,
+                end: i,
+                complete: true,
+            });
         } else if out.is_empty() {
-            out.push(TurnSpan { key: "pre".into(), start: 0, end: 0, complete: false });
+            out.push(TurnSpan {
+                key: "pre".into(),
+                start: 0,
+                end: 0,
+                complete: false,
+            });
         }
     }
     if let Some(last) = out.last_mut() {
@@ -103,7 +113,10 @@ pub fn segment(be: &dyn Backend, entries: &[Value]) -> (Vec<ChatItem>, Vec<Turn>
     // tool_use → чип "tool"; менять to_chat_items — только вместе с этим циклом.
     for (ei, e) in entries.iter().enumerate() {
         let idx = entry_first_item[ei];
-        let Some(t) = turns.iter_mut().find(|t| t.span.start <= idx && idx < t.span.end) else {
+        let Some(t) = turns
+            .iter_mut()
+            .find(|t| t.span.start <= idx && idx < t.span.end)
+        else {
             continue; // запись без items в самом конце — фактов не даёт
         };
         collect_facts(be.agent(), e, &mut t.facts);
@@ -133,6 +146,7 @@ fn collect_facts(agent: Agent, entry: &Value, f: &mut TurnFacts) {
     match agent {
         Agent::Claude => facts_claude(entry, f),
         Agent::Codex => facts_codex(entry, f),
+        Agent::Gemini => {} // тулы в chat-jsonl не размечены — фактов ходов нет
     }
 }
 
@@ -140,7 +154,9 @@ fn facts_claude(entry: &Value, f: &mut TurnFacts) {
     if entry.get("type").and_then(Value::as_str) != Some("assistant") {
         return;
     }
-    let Some(Value::Array(blocks)) = entry.pointer("/message/content") else { return };
+    let Some(Value::Array(blocks)) = entry.pointer("/message/content") else {
+        return;
+    };
     for b in blocks {
         if b.get("type").and_then(Value::as_str) != Some("tool_use") {
             continue;
@@ -149,12 +165,18 @@ fn facts_claude(entry: &Value, f: &mut TurnFacts) {
         let input = b.get("input");
         match name {
             "Edit" | "MultiEdit" | "NotebookEdit" | "Write" => {
-                let Some(p) = input.and_then(|i| i.get("file_path")).and_then(Value::as_str) else {
+                let Some(p) = input
+                    .and_then(|i| i.get("file_path"))
+                    .and_then(Value::as_str)
+                else {
                     continue;
                 };
                 if name == "Write" && p.ends_with(".md") {
                     if let Some(c) = input.and_then(|i| i.get("content")).and_then(Value::as_str) {
-                        f.md_heads.push(MdHead { path: p.to_string(), head: ellipsize(c, 2000) });
+                        f.md_heads.push(MdHead {
+                            path: p.to_string(),
+                            head: ellipsize(c, 2000),
+                        });
                     }
                 }
                 push_file(f, p, if name == "Write" { "created" } else { "edited" });
@@ -173,7 +195,9 @@ fn facts_codex(entry: &Value, f: &mut TurnFacts) {
     if entry.get("type").and_then(Value::as_str) != Some("response_item") {
         return;
     }
-    let Some(p) = entry.get("payload") else { return };
+    let Some(p) = entry.get("payload") else {
+        return;
+    };
     match p.get("type").and_then(Value::as_str) {
         Some("function_call") => {
             if p.get("name").and_then(Value::as_str) != Some("exec_command") {
@@ -191,11 +215,18 @@ fn facts_codex(entry: &Value, f: &mut TurnFacts) {
                 f.commands.push(ellipsize(&one_line(c), 200));
             }
         }
-        Some("custom_tool_call") if p.get("name").and_then(Value::as_str) == Some("apply_patch") => {
-            let Some(input) = p.get("input").and_then(Value::as_str) else { return };
+        Some("custom_tool_call")
+            if p.get("name").and_then(Value::as_str) == Some("apply_patch") =>
+        {
+            let Some(input) = p.get("input").and_then(Value::as_str) else {
+                return;
+            };
             for (path, kind) in patch_files(input) {
                 if kind == "created" && path.ends_with(".md") {
-                    f.md_heads.push(MdHead { path: path.clone(), head: ellipsize(input, 2000) });
+                    f.md_heads.push(MdHead {
+                        path: path.clone(),
+                        head: ellipsize(input, 2000),
+                    });
                 }
                 push_file(f, &path, kind);
             }
@@ -209,7 +240,10 @@ fn facts_codex(entry: &Value, f: &mut TurnFacts) {
 fn patch_files(patch: &str) -> Vec<(String, &'static str)> {
     let mut out = Vec::new();
     for line in patch.lines() {
-        for (prefix, kind) in [("*** Update File: ", "edited"), ("*** Add File: ", "created")] {
+        for (prefix, kind) in [
+            ("*** Update File: ", "edited"),
+            ("*** Add File: ", "created"),
+        ] {
             if let Some(p) = line.strip_prefix(prefix) {
                 let p = p.trim();
                 if !p.is_empty() {
@@ -259,7 +293,10 @@ commands:
 /// Precondition: head <= max и tail <= max (иначе выход длиннее max и возможен
 /// выход за границы) — проверяется debug_assert.
 pub fn head_tail(s: &str, max: usize, head: usize, tail: usize) -> String {
-    debug_assert!(head <= max && tail <= max, "head_tail: head/tail не должны превышать max");
+    debug_assert!(
+        head <= max && tail <= max,
+        "head_tail: head/tail не должны превышать max"
+    );
     let chars: Vec<char> = s.chars().collect();
     if chars.len() <= max {
         return s.to_string();
@@ -297,7 +334,10 @@ pub fn build_prompt(user_prompt: &str, facts: &TurnFacts) -> String {
     }
     p.push_str("---\nХОД:\n");
     p.push_str(&format!("Пользователь: {user_prompt}\n"));
-    p.push_str(&format!("Агент: {}\n", head_tail(&facts.final_reply, 4000, 2600, 1200)));
+    p.push_str(&format!(
+        "Агент: {}\n",
+        head_tail(&facts.final_reply, 4000, 2600, 1200)
+    ));
     if !facts.tool_log.is_empty() {
         p.push_str(&format!(
             "Инструменты: {}\n",
@@ -313,7 +353,9 @@ pub fn build_prompt(user_prompt: &str, facts: &TurnFacts) -> String {
         md_budget = md_budget.saturating_sub(head.chars().count());
         p.push_str(&format!("Записанная дока {}:\n{}\n", m.path, head));
     }
-    p.push_str("\nНапоминание: ответ — ОДИН JSON-объект по схеме, проза по-русски, идентификаторы as-is.");
+    p.push_str(
+        "\nНапоминание: ответ — ОДИН JSON-объект по схеме, проза по-русски, идентификаторы as-is.",
+    );
     p
 }
 
@@ -387,7 +429,10 @@ fn push_file(f: &mut TurnFacts, path: &str, kind: &str) {
         }
         return;
     }
-    f.files.push(FileTouch { path: path.to_string(), kind: kind.to_string() });
+    f.files.push(FileTouch {
+        path: path.to_string(),
+        kind: kind.to_string(),
+    });
 }
 
 #[cfg(test)]
@@ -397,7 +442,14 @@ mod tests {
     use serde_json::json;
 
     fn it(role: &'static str, kind: &'static str, text: &str, ts: i64) -> ChatItem {
-        ChatItem { role, kind, text: text.into(), ts, diff: None, stat: None }
+        ChatItem {
+            role,
+            kind,
+            text: text.into(),
+            ts,
+            diff: None,
+            stat: None,
+        }
     }
 
     #[test]
@@ -411,8 +463,14 @@ mod tests {
         ];
         let s = spans(&items);
         assert_eq!(s.len(), 2);
-        assert_eq!((s[0].key.as_str(), s[0].start, s[0].end, s[0].complete), ("100", 0, 3, true));
-        assert_eq!((s[1].key.as_str(), s[1].start, s[1].end, s[1].complete), ("200", 3, 5, true));
+        assert_eq!(
+            (s[0].key.as_str(), s[0].start, s[0].end, s[0].complete),
+            ("100", 0, 3, true)
+        );
+        assert_eq!(
+            (s[1].key.as_str(), s[1].start, s[1].end, s[1].complete),
+            ("200", 3, 5, true)
+        );
     }
 
     #[test]
@@ -425,7 +483,10 @@ mod tests {
         ];
         let s = spans(&items);
         assert_eq!(s.len(), 2);
-        assert_eq!((s[0].key.as_str(), s[0].start, s[0].end, s[0].complete), ("pre", 0, 2, false));
+        assert_eq!(
+            (s[0].key.as_str(), s[0].start, s[0].end, s[0].complete),
+            ("pre", 0, 2, false)
+        );
         assert!(s[1].complete);
     }
 
@@ -477,8 +538,14 @@ mod tests {
         assert_eq!(
             t.facts.files,
             vec![
-                FileTouch { path: "src/install/mod.rs".into(), kind: "edited".into() },
-                FileTouch { path: "docs/retry.md".into(), kind: "created".into() },
+                FileTouch {
+                    path: "src/install/mod.rs".into(),
+                    kind: "edited".into()
+                },
+                FileTouch {
+                    path: "docs/retry.md".into(),
+                    kind: "created".into()
+                },
             ]
         );
         assert_eq!(t.facts.commands, vec!["cargo test".to_string()]);
@@ -511,8 +578,14 @@ mod tests {
         assert_eq!(
             f.files,
             vec![
-                FileTouch { path: "ui/renderer.js".into(), kind: "edited".into() },
-                FileTouch { path: "docs/new.md".into(), kind: "created".into() },
+                FileTouch {
+                    path: "ui/renderer.js".into(),
+                    kind: "edited".into()
+                },
+                FileTouch {
+                    path: "docs/new.md".into(),
+                    kind: "created".into()
+                },
             ]
         );
         assert_eq!(f.commands, vec!["npm test".to_string()]);
@@ -538,9 +611,21 @@ mod tests {
         ];
         let (_items, turns) = segment(backend(Agent::Claude), &entries);
         assert_eq!(turns.len(), 2);
-        assert_eq!(turns[0].facts.files, vec![FileTouch { path: "a.rs".into(), kind: "edited".into() }]);
+        assert_eq!(
+            turns[0].facts.files,
+            vec![FileTouch {
+                path: "a.rs".into(),
+                kind: "edited".into()
+            }]
+        );
         assert_eq!(turns[0].facts.commands, vec!["cmd A".to_string()]);
-        assert_eq!(turns[1].facts.files, vec![FileTouch { path: "b.rs".into(), kind: "edited".into() }]);
+        assert_eq!(
+            turns[1].facts.files,
+            vec![FileTouch {
+                path: "b.rs".into(),
+                kind: "edited".into()
+            }]
+        );
         assert_eq!(turns[1].facts.commands, vec!["cmd B".to_string()]);
     }
 
@@ -550,7 +635,13 @@ mod tests {
         push_file(&mut f, "a.rs", "edited");
         push_file(&mut f, "a.rs", "created");
         push_file(&mut f, "a.rs", "edited");
-        assert_eq!(f.files, vec![FileTouch { path: "a.rs".into(), kind: "created".into() }]);
+        assert_eq!(
+            f.files,
+            vec![FileTouch {
+                path: "a.rs".into(),
+                kind: "created".into()
+            }]
+        );
     }
 
     #[test]
@@ -564,7 +655,10 @@ mod tests {
         assert!(p.contains("cargo test"));
         assert!(p.contains("Пользователь: сделай A"));
         assert!(p.contains("Пример."), "few-shot присутствует");
-        assert!(p.trim_end().ends_with("идентификаторы as-is."), "языковой якорь в конце");
+        assert!(
+            p.trim_end().ends_with("идентификаторы as-is."),
+            "языковой якорь в конце"
+        );
     }
 
     #[test]
@@ -603,14 +697,20 @@ mod tests {
     #[test]
     fn parse_card_strips_prose_and_fences() {
         let out = "Вот JSON:\n```json\n{\"summary\": \"Готово.\", \"files\": [], \"docs_digest\": \"\", \"commands\": \"\"}\n```";
-        assert_eq!(parse_card(out, &facts_with(&[])).unwrap().summary, "Готово.");
+        assert_eq!(
+            parse_card(out, &facts_with(&[])).unwrap().summary,
+            "Готово."
+        );
     }
 
     #[test]
     fn parse_card_repairs_truncated_json() {
         // модель оборвалась посреди строки — докручиваем "}
         let out = r#"{"summary": "Полдела сделано"#;
-        assert_eq!(parse_card(out, &facts_with(&[])).unwrap().summary, "Полдела сделано");
+        assert_eq!(
+            parse_card(out, &facts_with(&[])).unwrap().summary,
+            "Полдела сделано"
+        );
     }
 
     #[test]
@@ -629,7 +729,10 @@ mod tests {
         assert_eq!(c.files.len(), 1, "чужой путь отброшен");
         assert_eq!(c.files[0].path, "a.rs");
         let empty = r#"{"summary": "", "files": [], "docs_digest": "", "commands": ""}"#;
-        assert!(parse_card(empty, &facts_with(&[])).is_none(), "пустое summary → None");
+        assert!(
+            parse_card(empty, &facts_with(&[])).is_none(),
+            "пустое summary → None"
+        );
         assert!(parse_card("совсем не json", &facts_with(&[])).is_none());
     }
 }

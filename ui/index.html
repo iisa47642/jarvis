@@ -164,6 +164,107 @@
   /* нижний отступ — чтобы последние строки выезжали из-под парящего футера */
   .list { padding: 8px 10px 68px; display: flex; flex-direction: column; gap: 2px; }
 
+  .bridgecard {
+    margin: 0 0 8px;
+    padding: 10px;
+    border: 1px solid rgba(108, 160, 255, 0.16);
+    border-radius: 8px;
+    background: linear-gradient(180deg, rgba(108, 160, 255, 0.10), rgba(255, 255, 255, 0.035));
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    flex: none;
+  }
+  .bridgecard.active {
+    border-color: rgba(65, 201, 142, 0.22);
+    background: linear-gradient(180deg, rgba(65, 201, 142, 0.08), rgba(255, 255, 255, 0.032));
+  }
+  .bridgehead { display: flex; align-items: center; gap: 10px; min-width: 0; }
+  .bridgetitle { font-size: 12.5px; font-weight: 650; color: var(--text); flex: none; }
+  .bridgesub { font-size: 11.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .bridgeactions { margin-left: auto; display: flex; gap: 6px; flex: none; }
+  .bridgegoal {
+    width: 100%;
+    min-height: 48px;
+    resize: vertical;
+    outline: none;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 7px;
+    background: rgba(0, 0, 0, 0.12);
+    color: var(--text-body);
+    font: inherit;
+    line-height: 1.35;
+    padding: 8px 9px;
+  }
+  .bridgegoal::placeholder { color: var(--faint); }
+  .bridgemembers { display: flex; flex-direction: column; gap: 5px; }
+  .bridgemembers.live { flex-direction: row; flex-wrap: wrap; }
+  .bridgemember {
+    display: grid;
+    grid-template-columns: 16px 16px 84px minmax(0, 1fr);
+    align-items: center;
+    gap: 7px;
+    min-height: 26px;
+    color: var(--muted);
+    font-size: 11.5px;
+  }
+  .bridgemember input[type="checkbox"],
+  .bridgemember input[type="radio"] { accent-color: var(--working); }
+  .bridgerole {
+    min-width: 0;
+    height: 24px;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.045);
+    color: var(--text);
+    font: 11px var(--mono);
+    padding: 0 6px;
+    outline: none;
+  }
+  .bridgemeta {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .bridgechip {
+    display: inline-flex;
+    align-items: center;
+    height: 22px;
+    padding: 0 7px;
+    border-radius: 999px;
+    border: 1px solid rgba(255, 255, 255, 0.09);
+    background: rgba(255, 255, 255, 0.045);
+    color: var(--muted);
+    font: 10.5px var(--mono);
+  }
+  .bridgechip.flight {
+    color: #9fc3ff;
+    border-color: rgba(108, 160, 255, 0.32);
+    background: rgba(108, 160, 255, 0.09);
+  }
+  .bridgebtn {
+    appearance: none;
+    border: 1px solid rgba(255, 255, 255, 0.10);
+    background: rgba(255, 255, 255, 0.055);
+    color: var(--text);
+    border-radius: 6px;
+    height: 25px;
+    padding: 0 9px;
+    font: 11.5px -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+    cursor: default;
+  }
+  .bridgebtn:hover { background: rgba(255, 255, 255, 0.09); }
+  .bridgebtn.primary {
+    align-self: flex-start;
+    border-color: rgba(65, 201, 142, 0.30);
+    background: rgba(65, 201, 142, 0.11);
+  }
+  .bridgebtn.danger { color: #f0a5a5; border-color: rgba(240, 110, 110, 0.20); }
+  .bridgelog { display: flex; flex-direction: column; gap: 3px; border-top: 1px solid rgba(255, 255, 255, 0.055); padding-top: 7px; }
+  .bridgeev { display: grid; grid-template-columns: 46px minmax(0, 1fr); gap: 7px; font-size: 11px; color: var(--muted); min-width: 0; }
+  .bridgeev span:first-child { font-family: var(--mono); color: var(--faint); }
+  .bridgeev span:last-child { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
   .row {
     display: flex;
     align-items: center;
@@ -808,14 +909,15 @@
     box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
   }
 
-  /* длинные строки не убегают за экран: ширина от окна, перенос где угодно */
-  .msg.assistant { max-width: min(560px, 100%); }
-  .msg.user .bubble { max-width: min(440px, 100%); overflow-wrap: anywhere; }
+  /* ширина реплик растёт вместе с окном (фуллскрин/ресайз), а не статичные
+     560px; потолок 1080 — чтобы строка оставалась читаемой */
+  .msg.assistant { max-width: min(1080px, 94%); }
+  .msg.user .bubble { max-width: min(640px, 94%); overflow-wrap: anywhere; }
   .bubble table { display: block; overflow-x: auto; }
   .bubble td, .bubble th { overflow-wrap: anywhere; }
 
   /* карточка правки файла — GitHub-dark: хедер с файлом, ±строки с подложками */
-  .tooldiff { max-width: min(560px, 100%); }
+  .tooldiff { max-width: min(1080px, 94%); }
   .tdcard {
     border: 1px solid rgba(255, 255, 255, 0.08);
     border-radius: 10px;

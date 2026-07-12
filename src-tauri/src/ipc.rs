@@ -232,7 +232,9 @@ pub fn action_accel(d: &Arc<Daemon>, a: HkAction) -> Option<String> {
         HkAction::Dictation => {
             crate::stt::config::SttConfig::from_settings(&d.settings.load()).hotkey
         }
-        _ => d.settings.string(a.settings_key().expect("не-dictation имеет ключ")),
+        _ => d
+            .settings
+            .string(a.settings_key().expect("не-dictation имеет ключ")),
     };
     accel_from_raw(&raw, a)
 }
@@ -269,7 +271,9 @@ pub fn find_conflict(
 
 /// Снять регистрацию текущего сочетания действия (select — весь набор).
 fn unregister_action(d: &Arc<Daemon>, a: HkAction) {
-    let Some(accel) = action_accel(d, a) else { return };
+    let Some(accel) = action_accel(d, a) else {
+        return;
+    };
     let gs = d.app.global_shortcut();
     match a {
         HkAction::Select => {
@@ -367,7 +371,9 @@ pub async fn hotkey_assign(
     }
     if a == HkAction::Select {
         if normalize_select_template(&accel) != accel {
-            return err(format!("Битый шаблон «{accel}» — нужен вид Command+Alt+{{n}}"));
+            return err(format!(
+                "Битый шаблон «{accel}» — нужен вид Command+Alt+{{n}}"
+            ));
         }
     } else if accel.parse::<Shortcut>().is_err() {
         return err(format!("Не разобрал сочетание: {accel}"));
@@ -386,7 +392,9 @@ pub async fn hotkey_assign(
             .iter()
             .filter_map(|o| action_accel(&d, *o).map(|acc| (*o, acc)))
             .collect();
-        let Some(other) = find_conflict(&bindings, a, &accel) else { break };
+        let Some(other) = find_conflict(&bindings, a, &accel) else {
+            break;
+        };
         if !steal {
             return json!({ "ok": false, "conflict": { "action": other.id(), "label": other.label() } });
         }
@@ -619,7 +627,6 @@ pub fn normalize_select_template(raw: &str) -> String {
         SELECT_TEMPLATE_DEFAULT.to_string()
     }
 }
-
 
 /// Если shortcut — экземпляр шаблона с цифрой, вернуть номер варианта (1..9).
 pub fn match_select_template(template: &str, shortcut: &Shortcut) -> Option<u32> {
@@ -869,7 +876,9 @@ pub fn chat_summarize(app: AppHandle, session_id: String, turn_key: String) -> V
         return err("Сессия не найдена");
     }
     tauri::async_runtime::spawn(async move {
-        let Some((be, entries)) = d.turn_entries(&session_id) else { return };
+        let Some((be, entries)) = d.turn_entries(&session_id) else {
+            return;
+        };
         let (_items, turns) = crate::turns::segment(be, &entries);
         if let Some(t) = turns.iter().find(|t| t.span.key == turn_key) {
             d.turn_generate(&session_id, t).await;
@@ -905,7 +914,14 @@ pub fn file_open(app: AppHandle, session_id: String, path: String, reveal: bool)
 /// AppleScript и т.п.) — такие принудительно уводим в reveal.
 fn force_reveal(p: &std::path::Path) -> bool {
     const EXECUTABLE_DOCS: [&str; 8] = [
-        "command", "terminal", "workflow", "webloc", "tool", "applescript", "scpt", "app",
+        "command",
+        "terminal",
+        "workflow",
+        "webloc",
+        "tool",
+        "applescript",
+        "scpt",
+        "app",
     ];
     p.extension()
         .and_then(|e| e.to_str())
@@ -1379,7 +1395,12 @@ pub async fn session_save_image(data_base64: String, ext: String) -> Value {
         return err("Картинка больше 25 МБ");
     }
     // Разрешаем только безопасное короткое расширение из белого списка.
-    let ext = match ext.trim().trim_start_matches('.').to_ascii_lowercase().as_str() {
+    let ext = match ext
+        .trim()
+        .trim_start_matches('.')
+        .to_ascii_lowercase()
+        .as_str()
+    {
         "png" => "png",
         "jpg" | "jpeg" => "jpg",
         "gif" => "gif",
@@ -1398,7 +1419,11 @@ pub async fn session_save_image(data_base64: String, ext: String) -> Value {
     if let Ok(entries) = std::fs::read_dir(&dir) {
         let cutoff = std::time::SystemTime::now() - std::time::Duration::from_secs(3 * 24 * 3600);
         for e in entries.flatten() {
-            let old = e.metadata().and_then(|m| m.modified()).map(|t| t < cutoff).unwrap_or(false);
+            let old = e
+                .metadata()
+                .and_then(|m| m.modified())
+                .map(|t| t < cutoff)
+                .unwrap_or(false);
             if old {
                 let _ = std::fs::remove_file(e.path());
             }
@@ -1425,6 +1450,109 @@ pub async fn session_continue(app: AppHandle, session_id: String) -> Value {
         json!({ "session_id": session_id, "text": "продолжай" }),
     )
     .await
+}
+
+/* ================= multi-agent bridge ================= */
+
+#[tauri::command]
+pub fn bridge_get(app: AppHandle) -> Value {
+    Daemon::get(&app).bridge_snapshot()
+}
+
+/// Start an explicit multi-agent bridge over existing sessions.
+///
+/// Payload:
+/// `{ leadSid, members:[{sid, role, agent}], maxRounds?, goal? }`
+#[tauri::command]
+pub async fn bridge_start(app: AppHandle, config: Value) -> Value {
+    let d = Daemon::get(&app);
+    let lead_sid = config
+        .get("leadSid")
+        .or_else(|| config.get("lead_sid"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let Some(lead_sid) = lead_sid else {
+        return err("leadSid обязателен");
+    };
+
+    let mut members: Vec<crate::bridge::BridgeMember> = config
+        .get("members")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(crate::bridge::member_from_json)
+        .collect();
+    if members.iter().all(|m| m.sid != lead_sid) {
+        if let Some(s) = d.session(&lead_sid) {
+            members.push(crate::bridge::BridgeMember {
+                sid: lead_sid.clone(),
+                role: "lead".into(),
+                agent: crate::backend::Agent::from_opt(s.agent.as_deref())
+                    .label()
+                    .into(),
+                enabled: true,
+                in_flight: false,
+            });
+        }
+    }
+    members.retain(|m| d.session(&m.sid).is_some());
+    if members.len() < 2 {
+        return err("Нужно минимум 2 живые сессии");
+    }
+    if !members.iter().any(|m| m.sid == lead_sid) {
+        return err("leadSid не найден среди живых сессий");
+    }
+
+    let max_rounds = config
+        .get("maxRounds")
+        .or_else(|| config.get("max_rounds"))
+        .and_then(Value::as_u64)
+        .map(|n| n as u32);
+    let bridge = crate::bridge::Bridge::new(lead_sid.clone(), members, max_rounds);
+    {
+        let mut guard = d.bridge.lock().unwrap();
+        *guard = Some(bridge);
+    }
+    d.push_bridge();
+
+    if let Some(goal) = config
+        .get("goal")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        let text = format!(
+            "Multi-agent bridge запущен. Ты lead/orchestrator.\n\nЦель:\n{}\n\nУчастникам ставь задачи явными строками вида `@role: задача` или `@agent: задача`. Когда всё готово, напиши `@done` отдельной строкой.",
+            goal
+        );
+        let sent = reply_core(&d, lead_sid, text).await;
+        return json!({ "ok": true, "bridge": d.bridge_snapshot(), "sent": sent });
+    }
+
+    json!({ "ok": true, "bridge": d.bridge_snapshot() })
+}
+
+#[tauri::command]
+pub fn bridge_pause(app: AppHandle) -> Value {
+    let d = Daemon::get(&app);
+    d.bridge_pause(true);
+    ok()
+}
+
+#[tauri::command]
+pub fn bridge_resume(app: AppHandle) -> Value {
+    let d = Daemon::get(&app);
+    d.bridge_pause(false);
+    ok()
+}
+
+#[tauri::command]
+pub fn bridge_stop(app: AppHandle) -> Value {
+    let d = Daemon::get(&app);
+    d.bridge_stop();
+    ok()
 }
 
 /// Ядро отправки в сессию — общее для IPC-команды панели и капабилити
@@ -2340,9 +2468,15 @@ mod tests {
     #[test]
     fn normalize_falls_back_on_broken_template() {
         // без {n}, пусто, непарсибельный экземпляр → дефолт ⌘⌥{n}
-        assert_eq!(normalize_select_template("Command+Alt+5"), SELECT_TEMPLATE_DEFAULT);
+        assert_eq!(
+            normalize_select_template("Command+Alt+5"),
+            SELECT_TEMPLATE_DEFAULT
+        );
         assert_eq!(normalize_select_template(""), SELECT_TEMPLATE_DEFAULT);
-        assert_eq!(normalize_select_template("Bogus+{n}"), SELECT_TEMPLATE_DEFAULT);
+        assert_eq!(
+            normalize_select_template("Bogus+{n}"),
+            SELECT_TEMPLATE_DEFAULT
+        );
     }
 
     #[test]
@@ -2375,7 +2509,10 @@ mod tests {
             accel_from_raw("", HkAction::Quiet),
             Some("Command+Alt+J".to_string())
         );
-        assert_eq!(accel_from_raw("", HkAction::Dictation), Some("F8".to_string()));
+        assert_eq!(
+            accel_from_raw("", HkAction::Dictation),
+            Some("F8".to_string())
+        );
     }
 
     #[test]
@@ -2414,9 +2551,15 @@ mod tests {
             b(HkAction::Mute, "Command+Alt+M"),
         ];
         // то же действие — не конфликт (перезапись самого себя)
-        assert_eq!(find_conflict(&bindings, HkAction::Quiet, "Command+Alt+J"), None);
+        assert_eq!(
+            find_conflict(&bindings, HkAction::Quiet, "Command+Alt+J"),
+            None
+        );
         // свободное сочетание — не конфликт
-        assert_eq!(find_conflict(&bindings, HkAction::Quiet, "Command+Alt+X"), None);
+        assert_eq!(
+            find_conflict(&bindings, HkAction::Quiet, "Command+Alt+X"),
+            None
+        );
     }
 
     #[test]
@@ -2442,7 +2585,10 @@ mod tests {
     #[test]
     fn conflict_skips_broken_bindings() {
         let bindings = vec![b(HkAction::Mute, "Bogus+Nope")];
-        assert_eq!(find_conflict(&bindings, HkAction::Quiet, "Command+Alt+M"), None);
+        assert_eq!(
+            find_conflict(&bindings, HkAction::Quiet, "Command+Alt+M"),
+            None
+        );
     }
 }
 
@@ -2465,7 +2611,10 @@ mod turn_ipc_tests {
 
         assert!(resolve_user_file(Some(&cwd), "нет/такого.rs").is_err());
         assert!(resolve_user_file(None, "relative/without/cwd.rs").is_err());
-        assert!(resolve_user_file(Some(&cwd), "sub").is_err(), "каталог — не файл");
+        assert!(
+            resolve_user_file(Some(&cwd), "sub").is_err(),
+            "каталог — не файл"
+        );
     }
 
     #[test]
@@ -2475,6 +2624,9 @@ mod turn_ipc_tests {
         assert!(force_reveal(Path::new("A.COMMAND")), "регистр не важен");
         assert!(force_reveal(Path::new("/tmp/x/run.scpt")));
         assert!(!force_reveal(Path::new("a.rs")), "обычный файл открываем");
-        assert!(!force_reveal(Path::new("Makefile")), "без расширения — не блок");
+        assert!(
+            !force_reveal(Path::new("Makefile")),
+            "без расширения — не блок"
+        );
     }
 }

@@ -16,6 +16,8 @@ use crate::transcript::ChatItem;
 pub mod codex;
 pub mod codex_agent;
 pub mod codex_transcript;
+pub mod gemini;
+pub mod gemini_transcript;
 
 /// Какой CLI-агент стоит за сессией/вызовом.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -24,6 +26,7 @@ pub enum Agent {
     #[default]
     Claude,
     Codex,
+    Gemini,
 }
 
 impl Agent {
@@ -32,6 +35,8 @@ impl Agent {
     pub fn from_label(s: &str) -> Agent {
         if s.eq_ignore_ascii_case("codex") {
             Agent::Codex
+        } else if s.eq_ignore_ascii_case("gemini") || s.eq_ignore_ascii_case("agy") {
+            Agent::Gemini
         } else {
             Agent::Claude
         }
@@ -43,10 +48,11 @@ impl Agent {
         match self {
             Agent::Claude => "claude",
             Agent::Codex => "codex",
+            Agent::Gemini => "gemini",
         }
     }
-    pub fn all() -> [Agent; 2] {
-        [Agent::Claude, Agent::Codex]
+    pub fn all() -> [Agent; 3] {
+        [Agent::Claude, Agent::Codex, Agent::Gemini]
     }
 }
 
@@ -98,7 +104,9 @@ impl Backend for ClaudeBackend {
         crate::claude_bin::resolve_claude_bin().is_some()
     }
     fn read_entries(&self, file: &Path, max_bytes: u64) -> Vec<Value> {
-        crate::transcript::chain_from_entries(crate::transcript::read_recent_entries(file, max_bytes))
+        crate::transcript::chain_from_entries(crate::transcript::read_recent_entries(
+            file, max_bytes,
+        ))
     }
     fn to_chat_items(&self, entry: &Value) -> Vec<ChatItem> {
         crate::transcript::to_chat_items(entry)
@@ -124,7 +132,12 @@ impl Backend for ClaudeBackend {
         crate::util::friendly_model(id)
     }
     fn models(&self) -> &'static [(&'static str, &'static str)] {
-        &[("fable", "Fable"), ("opus", "Opus"), ("sonnet", "Sonnet"), ("haiku", "Haiku")]
+        &[
+            ("fable", "Fable"),
+            ("opus", "Opus"),
+            ("sonnet", "Sonnet"),
+            ("haiku", "Haiku"),
+        ]
     }
     fn effort_levels(&self) -> &'static [&'static str] {
         &["low", "medium", "high", "xhigh", "max"]
@@ -149,6 +162,7 @@ pub fn backend(a: Agent) -> &'static dyn Backend {
     match a {
         Agent::Claude => &CLAUDE,
         Agent::Codex => &codex::CODEX,
+        Agent::Gemini => &gemini::GEMINI,
     }
 }
 
@@ -161,9 +175,12 @@ mod tests {
         assert_eq!(Agent::from_label("codex"), Agent::Codex);
         assert_eq!(Agent::from_label("Codex"), Agent::Codex);
         assert_eq!(Agent::from_label("claude"), Agent::Claude);
+        assert_eq!(Agent::from_label("gemini"), Agent::Gemini);
+        assert_eq!(Agent::from_label("agy"), Agent::Gemini);
         assert_eq!(Agent::from_label("whatever"), Agent::Claude);
         assert_eq!(Agent::from_opt(None), Agent::Claude);
         assert_eq!(Agent::Codex.label(), "codex");
+        assert_eq!(Agent::Gemini.label(), "gemini");
         assert_eq!(Agent::Claude.label(), "claude");
     }
 
@@ -171,6 +188,7 @@ mod tests {
     fn dispatcher_returns_matching_agent() {
         assert_eq!(backend(Agent::Claude).agent(), Agent::Claude);
         assert_eq!(backend(Agent::Codex).agent(), Agent::Codex);
+        assert_eq!(backend(Agent::Gemini).agent(), Agent::Gemini);
     }
 
     #[test]

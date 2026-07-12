@@ -49,6 +49,8 @@ let state = [];
 let sel = 0;
 let view = 'list'; // list | chat | settings
 let chatSessionId = null;
+let bridgeState = null;
+const bridgeDraft = { goal: '', leadSid: null, selected: new Set(), roles: Object.create(null) };
 
 /* ---------- helpers ---------- */
 
@@ -243,6 +245,8 @@ function render() {
     return;
   }
 
+  renderBridgeCard(listEl);
+
   list.forEach((s, i) => {
     const row = document.createElement('div');
     row.className = `row ${s.status}${i === sel ? ' selected' : ''}`;
@@ -329,6 +333,180 @@ function render() {
     row.addEventListener('click', () => openSession(s));
     listEl.appendChild(row);
   });
+}
+
+function bridgeEligibleSessions() {
+  return orderedSessions().filter((s) => {
+    if (!s.tmuxPane) return false;
+    // Agy пока без хуков/транскрипта, поэтому живёт как tmux-only provisional
+    // сессия. В bridge его всё равно можно использовать как участника: задачи
+    // уходят прямо в pane, а отчёт можно вернуть вручную.
+    if (bridgeAgentLabel(s) === 'agy') return true;
+    return !s.provisional;
+  });
+}
+
+function roleForSession(s, i = 0) {
+  const ag = (s.agent || 'claude').toLowerCase();
+  if (bridgeDraft.roles[s.id]) return bridgeDraft.roles[s.id];
+  if (ag === 'claude') return i === 0 ? 'lead' : 'writer';
+  if (ag === 'codex') return 'reviewer';
+  if (ag === 'agy' || ag === 'gemini') return 'researcher';
+  return 'agent';
+}
+
+function bridgeAgentLabel(s) {
+  return (s.agent || 'claude').toLowerCase();
+}
+
+function ensureBridgeDraft(eligible) {
+  const ids = new Set(eligible.map((s) => s.id));
+  for (const id of [...bridgeDraft.selected]) {
+    if (!ids.has(id)) bridgeDraft.selected.delete(id);
+  }
+  if (!bridgeDraft.selected.size && eligible.length) {
+    const defaults = eligible.slice(0, Math.min(3, eligible.length));
+    defaults.forEach((s) => bridgeDraft.selected.add(s.id));
+  }
+  if (!bridgeDraft.leadSid || !ids.has(bridgeDraft.leadSid)) {
+    bridgeDraft.leadSid = eligible.find((s) => bridgeAgentLabel(s) === 'claude')?.id || eligible[0]?.id || null;
+  }
+}
+
+function renderBridgeCard(root) {
+  const eligible = bridgeEligibleSessions();
+  if (!bridgeState && eligible.length < 2) return;
+
+  ensureBridgeDraft(eligible);
+  const card = document.createElement('div');
+  card.className = `bridgecard ${bridgeState?.active ? 'active' : ''}`;
+
+  const head = document.createElement('div');
+  head.className = 'bridgehead';
+  const title = document.createElement('div');
+  title.className = 'bridgetitle';
+  title.textContent = 'Multi-agent';
+  const sub = document.createElement('div');
+  sub.className = 'bridgesub';
+  if (bridgeState?.active) {
+    const status = bridgeState.paused ? 'пауза' : 'активен';
+    sub.textContent = `${status} · ${bridgeState.rounds || 0}/${bridgeState.maxRounds || 0} раундов`;
+  } else {
+    sub.textContent = 'Claude, Codex и Agy в одном рабочем цикле';
+  }
+  head.append(title, sub);
+
+  const actions = document.createElement('div');
+  actions.className = 'bridgeactions';
+  if (bridgeState?.active) {
+    const pause = document.createElement('button');
+    pause.className = 'bridgebtn';
+    pause.textContent = bridgeState.paused ? 'Продолжить' : 'Пауза';
+    pause.addEventListener('click', async () => {
+      bridgeState.paused ? await window.jarvis.bridgeResume() : await window.jarvis.bridgePause();
+    });
+    const stop = document.createElement('button');
+    stop.className = 'bridgebtn danger';
+    stop.textContent = 'Стоп';
+    stop.addEventListener('click', () => window.jarvis.bridgeStop());
+    actions.append(pause, stop);
+  }
+  head.appendChild(actions);
+  card.appendChild(head);
+
+  if (bridgeState?.active) {
+    const members = document.createElement('div');
+    members.className = 'bridgemembers live';
+    for (const m of bridgeState.members || []) {
+      const chip = document.createElement('span');
+      chip.className = `bridgechip ${m.inFlight ? 'flight' : ''}`;
+      const s = state.find((x) => x.id === m.sid);
+      chip.textContent = `${m.role} · ${m.agent}${m.inFlight ? ' · работает' : ''}`;
+      chip.title = s ? `${s.project || '?'} · ${m.sid}` : m.sid;
+      members.appendChild(chip);
+    }
+    card.appendChild(members);
+
+    const evs = (bridgeState.events || []).slice(-5).reverse();
+    if (evs.length) {
+      const log = document.createElement('div');
+      log.className = 'bridgelog';
+      for (const ev of evs) {
+        const row = document.createElement('div');
+        row.className = `bridgeev ${ev.kind}`;
+        const k = document.createElement('span');
+        k.textContent = ev.kind;
+        const t = document.createElement('span');
+        t.textContent = ev.text;
+        row.append(k, t);
+        log.appendChild(row);
+      }
+      card.appendChild(log);
+    }
+    root.appendChild(card);
+    return;
+  }
+
+  const goal = document.createElement('textarea');
+  goal.className = 'bridgegoal';
+  goal.rows = 2;
+  goal.placeholder = 'Цель для команды агентов…';
+  goal.value = bridgeDraft.goal;
+  goal.addEventListener('input', () => { bridgeDraft.goal = goal.value; });
+  card.appendChild(goal);
+
+  const members = document.createElement('div');
+  members.className = 'bridgemembers';
+  eligible.forEach((s, i) => {
+    const row = document.createElement('label');
+    row.className = 'bridgemember';
+    const check = document.createElement('input');
+    check.type = 'checkbox';
+    check.checked = bridgeDraft.selected.has(s.id);
+    check.addEventListener('change', () => {
+      check.checked ? bridgeDraft.selected.add(s.id) : bridgeDraft.selected.delete(s.id);
+      render();
+    });
+    const radio = document.createElement('input');
+    radio.type = 'radio';
+    radio.name = 'bridgeLead';
+    radio.checked = bridgeDraft.leadSid === s.id;
+    radio.title = 'Lead';
+    radio.addEventListener('change', () => { bridgeDraft.leadSid = s.id; render(); });
+    const role = document.createElement('input');
+    role.className = 'bridgerole';
+    role.value = roleForSession(s, i);
+    role.addEventListener('input', () => { bridgeDraft.roles[s.id] = role.value.trim(); });
+    const meta = document.createElement('span');
+    meta.className = 'bridgemeta';
+    meta.textContent = `${bridgeAgentLabel(s)} · ${s.project || '?'}`;
+    row.append(check, radio, role, meta);
+    members.appendChild(row);
+  });
+  card.appendChild(members);
+
+  const start = document.createElement('button');
+  start.className = 'bridgebtn primary';
+  start.textContent = 'Запустить bridge';
+  start.addEventListener('click', async () => {
+    const selected = eligible.filter((s) => bridgeDraft.selected.has(s.id));
+    const lead = bridgeDraft.leadSid || selected[0]?.id;
+    const members = selected.map((s, i) => ({
+      sid: s.id,
+      role: roleForSession(s, i),
+      agent: bridgeAgentLabel(s),
+    }));
+    const res = await window.jarvis.bridgeStart({
+      leadSid: lead,
+      members,
+      maxRounds: 12,
+      goal: bridgeDraft.goal.trim(),
+    });
+    if (!res?.ok) showToast(res?.error || 'Bridge не запустился');
+  });
+  card.appendChild(start);
+
+  root.appendChild(card);
 }
 
 /* ---------- чат сессии ---------- */
@@ -1974,6 +2152,8 @@ window.jarvis.onState((list) => {
   }
 });
 window.jarvis.getState().then((list) => { state = list; rebuildOrder(); render(); });
+window.jarvis.onBridge((b) => { bridgeState = b; render(); });
+window.jarvis.bridgeGet?.().then((b) => { bridgeState = b; render(); }).catch(() => {});
 
 /* ---------- лимит-баннер ---------- */
 
@@ -2871,21 +3051,22 @@ function renderHistChats(g, q) {
   head.appendChild(back);
   head.appendChild(Object.assign(document.createElement('span'), { textContent: g.project }));
   head.appendChild(Object.assign(document.createElement('span'), { className: 'hcount', textContent: `${g.count} ${plural(g.count, 'чат', 'чата', 'чатов')}` }));
-  // новые сессии в директории проекта — отдельно для Claude и Codex; для групп
-  // без известной директории («другое», g.cwd == null) новая сессия бессмысленна
+  // новые сессии в директории проекта — отдельно для Claude, Codex и Agy; для
+  // групп без известной директории («другое», g.cwd == null) новая сессия бессмысленна
   if (g.cwd) {
-    const newClaude = Object.assign(document.createElement('button'), { className: 'abtn small', textContent: '+ Claude' });
-    newClaude.title = 'Новая сессия Claude в этой директории';
-    newClaude.addEventListener('click', (e) => { e.stopPropagation(); launchSession('claude', null, g.cwd); });
-    const newCodex = Object.assign(document.createElement('button'), { className: 'abtn small', textContent: '+ Codex' });
-    newCodex.title = 'Новая сессия Codex в этой директории';
-    newCodex.addEventListener('click', (e) => { e.stopPropagation(); launchSession('codex', null, g.cwd); });
-    head.appendChild(newClaude);
-    head.appendChild(newCodex);
+    const launchBtn = (agent, label, title) => {
+      const b = Object.assign(document.createElement('button'), { className: 'abtn small', textContent: label });
+      b.title = title;
+      b.addEventListener('click', (e) => { e.stopPropagation(); launchSession(agent, null, g.cwd); });
+      return b;
+    };
+    head.appendChild(launchBtn('claude', '+ Claude', 'Новая сессия Claude в этой директории'));
+    head.appendChild(launchBtn('codex', '+ Codex', 'Новая сессия Codex в этой директории'));
+    head.appendChild(launchBtn('agy', '+ Agy', 'Новая сессия Agy/Antigravity в этой директории'));
   }
   historyEl.appendChild(head);
 
-  historyEl.appendChild(Object.assign(document.createElement('div'), { className: 'hhint', textContent: '↵ — запустить продолжение в терминале · + Claude / + Codex — новая сессия · esc — к проектам' }));
+  historyEl.appendChild(Object.assign(document.createElement('div'), { className: 'hhint', textContent: '↵ — запустить продолжение в терминале · + Claude / + Codex / + Agy — новая сессия · esc — к проектам' }));
 
   const sessions = q ? g.sessions.filter((s) => s.title.toLowerCase().includes(q)) : g.sessions;
   if (!sessions.length) {

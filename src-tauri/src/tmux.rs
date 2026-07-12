@@ -57,12 +57,18 @@ pub async fn tmux_j(args: &[&str]) -> Result<String, String> {
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())
     } else {
         let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
-        Err(if err.is_empty() { "tmux: ошибка".into() } else { err })
+        Err(if err.is_empty() {
+            "tmux: ошибка".into()
+        } else {
+            err
+        })
     }
 }
 
 pub async fn pane_alive(pane: &str) -> bool {
-    tmux_j(&["display-message", "-p", "-t", pane, "ok"]).await.is_ok()
+    tmux_j(&["display-message", "-p", "-t", pane, "ok"])
+        .await
+        .is_ok()
 }
 
 pub async fn capture_pane(pane: &str) -> Option<String> {
@@ -186,7 +192,9 @@ pub async fn list_panes_meta() -> Result<Option<Vec<PaneInfo>>, ()> {
 
 /// Подписать tmux-окно заголовком сессии (терминал подписывает сам себя).
 pub async fn rename_window(pane: &str, name: &str) -> Result<(), String> {
-    tmux_j(&["rename-window", "-t", pane, name]).await.map(|_| ())
+    tmux_j(&["rename-window", "-t", pane, name])
+        .await
+        .map(|_| ())
 }
 
 /// Ответ на вопрос(ы) клавишами в пану. Раскладку строит `answer_keys`
@@ -217,32 +225,50 @@ pub async fn ping(pane: &str) -> Result<(), String> {
         return Err("Окно терминала не подключено (detached) — показать негде".into());
     }
     tmux_j(&[
-        "display-popup", "-t", pane, "-w", "34", "-h", "3", "-E",
+        "display-popup",
+        "-t",
+        pane,
+        "-w",
+        "34",
+        "-h",
+        "3",
+        "-E",
         "printf \"\\n   ◇ Jarvis: вот эта сессия\"; sleep 1",
     ])
     .await
     .map(|_| ())
-    .map_err(|e| format!("Поповер не показался: {}", crate::util::ellipsize(&crate::util::one_line(&e), 80)))
+    .map_err(|e| {
+        format!(
+            "Поповер не показался: {}",
+            crate::util::ellipsize(&crate::util::one_line(&e), 80)
+        )
+    })
 }
 
 // Клавиши пикеров Claude (выверено вживую на v2.1.172): несколько вопросов =
 // табы [Q1][Q2]…[Submit]. single-select: цифра сама перескакивает на следующий
 // таб; multiSelect: после тогглов нужен Tab/→, чтобы уйти с таба. После
 // последнего вопроса — Review-экран, где «1» = «Submit answers».
-const CLAUDE_ADVANCE: &str = "Tab";         // уйти с multiSelect-таба к следующему
-const CLAUDE_SUBMIT_RIGHT: &str = "Right";  // Submit-таб одиночного multiSelect-вопроса
-const CLAUDE_SUBMIT_CONFIRM: &str = "1";    // на Review-экране «1. Submit answers»
+const CLAUDE_ADVANCE: &str = "Tab"; // уйти с multiSelect-таба к следующему
+const CLAUDE_SUBMIT_RIGHT: &str = "Right"; // Submit-таб одиночного multiSelect-вопроса
+const CLAUDE_SUBMIT_CONFIRM: &str = "1"; // на Review-экране «1. Submit answers»
 
 /// Плоская последовательность tmux send-keys для ответа на вопрос(ы).
 /// Чистая и детерминированная — тестируется без tmux. `answers[i]` — выбранные
 /// опции (1-based) вопроса `i`. Ветвится по агенту и по позиции вопроса.
-pub fn answer_keys(agent: crate::backend::Agent, q: &crate::model::Question, answers: &[Vec<u32>]) -> Vec<String> {
+pub fn answer_keys(
+    agent: crate::backend::Agent,
+    q: &crate::model::Question,
+    answers: &[Vec<u32>],
+) -> Vec<String> {
     use crate::backend::Agent;
     let mut keys = Vec::new();
     let n_q = q.questions.len();
 
     match agent {
-        Agent::Claude => {
+        // Gemini: пикеры не сверены вживую — до выверки ведём как Claude
+        // (цифры/табы); вопросы gemini в панель пока не приходят (нет хука).
+        Agent::Claude | Agent::Gemini => {
             // Быстрый путь: один вопрос, single-select — цифра авто-подтверждает.
             if n_q == 1 && !q.questions[0].multi_select {
                 if let Some(i) = answers.first().and_then(|a| a.first()) {
@@ -276,8 +302,7 @@ pub fn answer_keys(agent: crate::backend::Agent, q: &crate::model::Question, ans
             // Codex всегда один вопрос (скрин-скрейп). Навигация стрелками от
             // подсветки на опции 1; Space тогглит в мультивыборе; Enter подтверждает.
             let item_multi = q.questions.first().map(|x| x.multi_select).unwrap_or(false);
-            let mut targets: Vec<u32> =
-                answers.first().cloned().unwrap_or_default();
+            let mut targets: Vec<u32> = answers.first().cloned().unwrap_or_default();
             targets.sort_unstable();
             let mut cursor: u32 = 1; // подсветка стартует на опции 1
             for t in targets {
@@ -323,12 +348,19 @@ mod answer_keys_tests {
             header: String::new(),
             multi_select: multi,
             options: (0..n)
-                .map(|i| QuestionOption { label: format!("o{i}"), description: String::new() })
+                .map(|i| QuestionOption {
+                    label: format!("o{i}"),
+                    description: String::new(),
+                })
                 .collect(),
         }
     }
     fn q(items: Vec<QuestionItem>) -> Question {
-        Question { at: 0, from_screen: false, questions: items }
+        Question {
+            at: 0,
+            from_screen: false,
+            questions: items,
+        }
     }
 
     // Claude, один вопрос, single-select: цифра авто-подтверждает.
@@ -342,7 +374,13 @@ mod answer_keys_tests {
     #[test]
     fn claude_single_question_multi_select_toggles_then_submit() {
         let keys = answer_keys(Agent::Claude, &q(vec![item(true, 3)]), &[vec![1, 3]]);
-        assert_eq!(keys, vec!["1", "3", "Right", "1"].iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        assert_eq!(
+            keys,
+            vec!["1", "3", "Right", "1"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>()
+        );
     }
 
     // Claude, два single-select вопроса (выверено вживую): каждая цифра сама
@@ -354,7 +392,13 @@ mod answer_keys_tests {
             &q(vec![item(false, 3), item(false, 2)]),
             &[vec![2], vec![1]],
         );
-        assert_eq!(keys, vec!["2", "1", "1"].iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        assert_eq!(
+            keys,
+            vec!["2", "1", "1"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>()
+        );
     }
 
     // Claude, multiSelect-вопрос + single-select (выверено вживую): тогглы Q1,
@@ -366,20 +410,38 @@ mod answer_keys_tests {
             &q(vec![item(true, 3), item(false, 2)]),
             &[vec![1, 3], vec![1]],
         );
-        assert_eq!(keys, vec!["1", "3", "Tab", "1", "1"].iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        assert_eq!(
+            keys,
+            vec!["1", "3", "Tab", "1", "1"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>()
+        );
     }
 
     // Codex, single-select: стрелки вниз от опции 1, затем Enter.
     #[test]
     fn codex_single_select_navigates_down_then_enter() {
         let keys = answer_keys(Agent::Codex, &q(vec![item(false, 4)]), &[vec![3]]);
-        assert_eq!(keys, vec!["Down", "Down", "Enter"].iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        assert_eq!(
+            keys,
+            vec!["Down", "Down", "Enter"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>()
+        );
     }
 
     // Codex, multiSelect: Space на каждой выбранной по ходу вниз, затем Enter.
     #[test]
     fn codex_multi_select_space_at_each_then_enter() {
         let keys = answer_keys(Agent::Codex, &q(vec![item(true, 4)]), &[vec![1, 3]]);
-        assert_eq!(keys, vec!["Space", "Down", "Down", "Space", "Enter"].iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        assert_eq!(
+            keys,
+            vec!["Space", "Down", "Down", "Space", "Enter"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>()
+        );
     }
 }
